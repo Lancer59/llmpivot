@@ -1,5 +1,5 @@
 """
-FastAPI router for the llmpivot UI.
+FastAPI router for the Prompt Manager UI.
 All routes are relative — mount at any prefix with app.mount().
 """
 

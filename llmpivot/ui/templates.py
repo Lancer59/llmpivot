@@ -7,6 +7,9 @@ import difflib
 from typing import Optional
 
 
+APP_NAME = "Prompt Manager"
+
+
 # ---------------------------------------------------------------------------
 # Shared layout
 # ---------------------------------------------------------------------------
@@ -17,65 +20,129 @@ def _layout(title: str, body: str, protected: bool = False, base: str = "") -> s
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>{title} — llmpivot</title>
+<title>{title} — {APP_NAME}</title>
 <style>
   *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
-  body {{ font-family: system-ui, sans-serif; background: #0f1117; color: #e2e8f0; min-height: 100vh; }}
-  a {{ color: #7c9ef8; text-decoration: none; }}
+  :root {{
+    color-scheme: dark;
+    --bg: #0f1117;
+    --surface: #191d27;
+    --surface-strong: #202636;
+    --line: #30364a;
+    --line-soft: #242a3a;
+    --text: #edf2f7;
+    --muted: #98a2b3;
+    --muted-strong: #c4ccd8;
+    --accent: #8fb3ff;
+    --accent-strong: #a7f3d0;
+    --danger-bg: #742a2a;
+    --danger-text: #feb2b2;
+  }}
+  body {{
+    font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background:
+      linear-gradient(180deg, #151925 0%, var(--bg) 34%, #11131a 100%);
+    color: var(--text);
+    min-height: 100vh;
+  }}
+  a {{ color: var(--accent); text-decoration: none; }}
   a:hover {{ text-decoration: underline; }}
-  .nav {{ background: #1a1d27; border-bottom: 1px solid #2d3148; padding: 12px 24px; display: flex; align-items: center; gap: 16px; }}
-  .nav-brand {{ font-weight: 700; font-size: 1.1rem; color: #fff; }}
-  .nav-badge {{ font-size: 0.7rem; background: #7c9ef8; color: #0f1117; padding: 2px 7px; border-radius: 99px; font-weight: 600; }}
-  .container {{ max-width: 960px; margin: 0 auto; padding: 32px 24px; }}
-  h1 {{ font-size: 1.5rem; font-weight: 700; margin-bottom: 24px; }}
-  h2 {{ font-size: 1.1rem; font-weight: 600; margin-bottom: 12px; color: #a0aec0; }}
-  .card {{ background: #1a1d27; border: 1px solid #2d3148; border-radius: 10px; padding: 20px; margin-bottom: 16px; }}
+  .nav {{
+    background: rgba(18, 22, 32, 0.92);
+    border-bottom: 1px solid var(--line-soft);
+    backdrop-filter: blur(14px);
+    position: sticky;
+    top: 0;
+    z-index: 10;
+  }}
+  .nav-inner {{
+    max-width: 1080px;
+    margin: 0 auto;
+    padding: 14px 24px;
+    display: flex;
+    align-items: center;
+    gap: 18px;
+  }}
+  .nav-brand {{
+    font-weight: 760;
+    font-size: 1.04rem;
+    color: #fff;
+    white-space: nowrap;
+  }}
+  .nav-links {{ margin-left: auto; display: flex; align-items: center; gap: 6px; }}
+  .nav-link {{
+    color: var(--muted-strong);
+    font-size: 0.9rem;
+    font-weight: 600;
+    padding: 7px 11px;
+    border-radius: 7px;
+  }}
+  .nav-link:hover {{ background: var(--surface-strong); color: #fff; text-decoration: none; }}
+  .nav-badge {{ font-size: 0.72rem; background: #4c2f12; color: #fbd38d; padding: 3px 8px; border-radius: 99px; font-weight: 700; }}
+  .container {{ max-width: 1080px; margin: 0 auto; padding: 34px 24px; }}
+  h1 {{ font-size: 1.55rem; font-weight: 750; margin-bottom: 24px; }}
+  h2 {{ font-size: 1.02rem; font-weight: 700; margin-bottom: 12px; color: var(--muted-strong); }}
+  .card {{ background: rgba(25, 29, 39, 0.96); border: 1px solid var(--line-soft); border-radius: 8px; padding: 20px; margin-bottom: 16px; box-shadow: 0 18px 45px rgba(0, 0, 0, 0.18); }}
   table {{ width: 100%; border-collapse: collapse; font-size: 0.9rem; }}
-  th {{ text-align: left; padding: 8px 12px; color: #718096; border-bottom: 1px solid #2d3148; font-weight: 500; }}
-  td {{ padding: 8px 12px; border-bottom: 1px solid #1e2235; vertical-align: top; }}
+  th {{ text-align: left; padding: 11px 14px; color: var(--muted); border-bottom: 1px solid var(--line); font-weight: 650; }}
+  td {{ padding: 11px 14px; border-bottom: 1px solid #202635; vertical-align: middle; }}
+  tbody tr {{ transition: background .14s ease; }}
+  tbody tr:hover {{ background: rgba(255, 255, 255, 0.025); }}
   tr:last-child td {{ border-bottom: none; }}
   .badge {{ display: inline-block; font-size: 0.7rem; padding: 2px 8px; border-radius: 99px; font-weight: 600; }}
   .badge-prod {{ background: #276749; color: #9ae6b4; }}
   .badge-staging {{ background: #744210; color: #fbd38d; }}
   .badge-experiment {{ background: #44337a; color: #d6bcfa; }}
   .badge-active {{ background: #2a4365; color: #90cdf4; }}
-  .btn {{ display: inline-block; padding: 7px 16px; border-radius: 6px; font-size: 0.85rem; font-weight: 500; cursor: pointer; border: none; transition: opacity .15s; }}
-  .btn:hover {{ opacity: 0.85; }}
-  .btn-primary {{ background: #7c9ef8; color: #0f1117; }}
-  .btn-ghost {{ background: transparent; border: 1px solid #2d3148; color: #a0aec0; }}
-  .btn-danger {{ background: #742a2a; color: #feb2b2; }}
+  .btn {{ display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 34px; padding: 7px 15px; border-radius: 7px; font-size: 0.85rem; font-weight: 700; cursor: pointer; border: 1px solid transparent; transition: background .15s, border-color .15s, transform .15s; }}
+  .btn:hover {{ transform: translateY(-1px); text-decoration: none; }}
+  .btn-primary {{ background: var(--accent); color: #0f1117; }}
+  .btn-primary:hover {{ background: #a3c2ff; }}
+  .btn-ghost {{ background: rgba(255, 255, 255, 0.02); border-color: var(--line); color: var(--muted-strong); }}
+  .btn-ghost:hover {{ background: var(--surface-strong); border-color: #46506a; color: #fff; }}
+  .btn-danger {{ background: var(--danger-bg); color: var(--danger-text); }}
   .btn-sm {{ padding: 4px 10px; font-size: 0.78rem; }}
-  textarea {{ width: 100%; background: #0f1117; border: 1px solid #2d3148; border-radius: 6px; color: #e2e8f0; padding: 12px; font-family: 'Courier New', monospace; font-size: 0.9rem; resize: vertical; min-height: 160px; }}
-  textarea:focus {{ outline: none; border-color: #7c9ef8; }}
-  input[type=text], input[type=password], select {{ background: #0f1117; border: 1px solid #2d3148; border-radius: 6px; color: #e2e8f0; padding: 8px 12px; font-size: 0.9rem; width: 100%; }}
-  input:focus, select:focus {{ outline: none; border-color: #7c9ef8; }}
+  textarea {{ width: 100%; background: #10141d; border: 1px solid var(--line); border-radius: 7px; color: var(--text); padding: 12px; font-family: 'Courier New', monospace; font-size: 0.9rem; resize: vertical; min-height: 160px; }}
+  textarea:focus {{ outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(143, 179, 255, 0.14); }}
+  input[type=text], input[type=password], select {{ background: #10141d; border: 1px solid var(--line); border-radius: 7px; color: var(--text); padding: 9px 12px; font-size: 0.9rem; width: 100%; }}
+  input:focus, select:focus {{ outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(143, 179, 255, 0.14); }}
   .form-group {{ margin-bottom: 16px; }}
-  label {{ display: block; font-size: 0.85rem; color: #a0aec0; margin-bottom: 6px; }}
-  .error {{ background: #742a2a; color: #feb2b2; padding: 10px 14px; border-radius: 6px; margin-bottom: 16px; font-size: 0.9rem; }}
+  label {{ display: block; font-size: 0.85rem; color: var(--muted-strong); margin-bottom: 6px; font-weight: 650; }}
+  .error {{ background: var(--danger-bg); color: var(--danger-text); padding: 10px 14px; border-radius: 7px; margin-bottom: 16px; font-size: 0.9rem; }}
   .success {{ background: #276749; color: #9ae6b4; padding: 10px 14px; border-radius: 6px; margin-bottom: 16px; font-size: 0.9rem; }}
   .diff-add {{ background: #1a3a2a; color: #9ae6b4; display: block; padding: 1px 8px; }}
   .diff-remove {{ background: #3a1a1a; color: #feb2b2; display: block; padding: 1px 8px; }}
-  .diff-same {{ display: block; padding: 1px 8px; color: #718096; }}
-  .diff-block {{ font-family: 'Courier New', monospace; font-size: 0.85rem; border: 1px solid #2d3148; border-radius: 6px; overflow: auto; max-height: 400px; }}
+  .diff-same {{ display: block; padding: 1px 8px; color: var(--muted); }}
+  .diff-block {{ font-family: 'Courier New', monospace; font-size: 0.85rem; border: 1px solid var(--line); border-radius: 7px; overflow: auto; max-height: 400px; }}
   .side-by-side {{ display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }}
-  .suggest-box {{ background: #1a2744; border: 1px solid #3a5298; border-radius: 8px; padding: 16px; margin-top: 12px; display: none; }}
-  .suggest-content {{ font-family: 'Courier New', monospace; font-size: 0.85rem; white-space: pre-wrap; color: #e2e8f0; margin-bottom: 12px; }}
-  .spinner {{ display: inline-block; width: 14px; height: 14px; border: 2px solid #7c9ef8; border-top-color: transparent; border-radius: 50%; animation: spin .6s linear infinite; vertical-align: middle; margin-right: 6px; }}
+  .suggest-box {{ background: #17243d; border: 1px solid #3a5298; border-radius: 8px; padding: 16px; margin-top: 12px; display: none; }}
+  .suggest-content {{ font-family: 'Courier New', monospace; font-size: 0.85rem; white-space: pre-wrap; color: var(--text); margin-bottom: 12px; }}
+  .spinner {{ display: inline-block; width: 14px; height: 14px; border: 2px solid var(--accent); border-top-color: transparent; border-radius: 50%; animation: spin .6s linear infinite; vertical-align: middle; margin-right: 6px; }}
   @keyframes spin {{ to {{ transform: rotate(360deg); }} }}
   .mono {{ font-family: 'Courier New', monospace; font-size: 0.85rem; }}
-  .text-muted {{ color: #718096; font-size: 0.85rem; }}
+  .text-muted {{ color: var(--muted); font-size: 0.85rem; }}
   .flex {{ display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }}
   .mt-8 {{ margin-top: 8px; }}
   .mt-16 {{ margin-top: 16px; }}
+  @media (max-width: 640px) {{
+    .nav-inner {{ padding: 12px 16px; align-items: flex-start; flex-direction: column; gap: 10px; }}
+    .nav-links {{ margin-left: 0; width: 100%; }}
+    .nav-link {{ flex: 1; text-align: center; }}
+    .container {{ padding: 24px 16px; }}
+    .side-by-side {{ grid-template-columns: 1fr; }}
+  }}
 </style>
 </head>
 <body>
 <nav class="nav">
-  <span class="nav-brand">⚡ llmpivot</span>
-  <span class="nav-badge">v1</span>
-  {'<span class="nav-badge" style="background:#744210;color:#fbd38d;">🔒 protected</span>' if protected else ''}
-  <a href="{base}/list" style="margin-left:auto;font-size:0.9rem;">Prompts</a>
-  <a href="{base}/logs" style="font-size:0.9rem;">Logs</a>
+  <div class="nav-inner">
+    <span class="nav-brand">{APP_NAME}</span>
+    {'<span class="nav-badge">protected</span>' if protected else ''}
+    <div class="nav-links">
+      <a href="{base}/list" class="nav-link">Prompts</a>
+      <a href="{base}/logs" class="nav-link">Logs</a>
+    </div>
+  </div>
 </nav>
 <div class="container">
 {body}

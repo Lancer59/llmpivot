@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "llmpivot"
-version = "0.1.0"
+version = "0.1.1"
 description = "Runtime prompt control and versioning for production apps"
 readme = "README.md"
 license = { text = "MIT" }
