@@ -1,6 +1,6 @@
 """
 FastAPI router for the Prompt Manager UI.
-All routes are relative - mount at any prefix with app.mount().
+Supports Auth & RBAC session management, multi-tenancy, and pluggable storage engines.
 """
 
 import json
@@ -8,16 +8,12 @@ from typing import Optional, TYPE_CHECKING
 from fastapi import APIRouter, Form, Request, UploadFile, File
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 
-from ..db import (
-    fetch_all_prompts,
-    fetch_prompt_versions,
-    fetch_version_by_id,
-    create_version,
-    set_active_version,
-    soft_delete_prompt,
-    fetch_logs,
-    export_prompts,
-    import_prompts,
+from ..auth import (
+    hash_password,
+    verify_password,
+    create_token,
+    get_current_user_from_request,
+    has_permission,
 )
 from .templates import (
     prompt_list,
@@ -26,6 +22,8 @@ from .templates import (
     diff_page,
     ab_test_page,
     logs_page,
+    login_page,
+    users_page,
 )
 
 if TYPE_CHECKING:
@@ -33,11 +31,6 @@ if TYPE_CHECKING:
 
 
 def _base(request: Request) -> str:
-    """
-    Return the mount prefix (e.g. '/prompts') so all links and redirects
-    are absolute and work regardless of nesting depth.
-    """
-    # request.scope["root_path"] is set by Starlette when sub-mounted
     root = request.scope.get("root_path", "").rstrip("/")
     return root
 
@@ -45,27 +38,121 @@ def _base(request: Request) -> str:
 def build_router(manager: "PromptManager") -> APIRouter:
     router = APIRouter()
 
+    def _get_user(request: Request) -> Optional[dict]:
+        if manager.auth_mode == "rbac":
+            return get_current_user_from_request(request, manager.secret_key)
+        return None
+
+    def _check_auth(request: Request, min_role: str = "viewer") -> Optional[RedirectResponse]:
+        if manager.auth_mode == "rbac":
+            user = _get_user(request)
+            if not user:
+                return RedirectResponse(f"{_base(request)}/login", status_code=303)
+            if not has_permission(user.get("role", "viewer"), min_role):
+                return RedirectResponse(f"{_base(request)}/list", status_code=303)
+        return None
+
     def _check_password(password: Optional[str]) -> bool:
-        if not manager.protected_mode:
-            return True
-        return password == manager.admin_password
+        if manager.protected_mode or manager.auth_mode == "protected":
+            return password == manager.admin_password
+        return True
 
     # ------------------------------------------------------------------
-    # Root redirect
+    # Auth routes (/login, /logout)
+    # ------------------------------------------------------------------
+
+    @router.get("/login", response_class=HTMLResponse)
+    async def get_login(request: Request):
+        return HTMLResponse(login_page(_base(request)))
+
+    @router.post("/login", response_class=HTMLResponse)
+    async def post_login(
+        request: Request,
+        username: str = Form(...),
+        password: str = Form(...),
+    ):
+        base = _base(request)
+        user = await manager.storage.get_user(username)
+        if not user or not verify_password(password, user.get("password_hash", "")):
+            return HTMLResponse(login_page(base, error="Invalid username or password."), status_code=400)
+
+        token = create_token(
+            {"id": user["id"], "username": user["username"], "role": user.get("role", "editor")},
+            manager.secret_key,
+        )
+        resp = RedirectResponse(f"{base}/list", status_code=303)
+        resp.set_cookie("llmpivot_session", token, httponly=True, samesite="lax")
+        return resp
+
+    @router.get("/logout")
+    async def logout(request: Request):
+        resp = RedirectResponse(f"{_base(request)}/login", status_code=303)
+        resp.delete_cookie("llmpivot_session")
+        return resp
+
+    # ------------------------------------------------------------------
+    # User Management (/users)
+    # ------------------------------------------------------------------
+
+    @router.get("/users", response_class=HTMLResponse)
+    async def list_users_route(request: Request):
+        auth_redirect = _check_auth(request, min_role="admin")
+        if auth_redirect:
+            return auth_redirect
+
+        user = _get_user(request)
+        users = await manager.storage.fetch_users(tenant_id=manager.tenant_id)
+        return HTMLResponse(users_page(users, user, _base(request)))
+
+    @router.post("/users", response_class=HTMLResponse)
+    async def create_user_route(
+        request: Request,
+        username: str = Form(...),
+        password: str = Form(...),
+        role: str = Form("editor"),
+        email: str = Form(""),
+    ):
+        auth_redirect = _check_auth(request, min_role="admin")
+        if auth_redirect:
+            return auth_redirect
+
+        base = _base(request)
+        user = _get_user(request)
+        existing = await manager.storage.get_user(username)
+        if existing:
+            users = await manager.storage.fetch_users(tenant_id=manager.tenant_id)
+            return HTMLResponse(users_page(users, user, base, error=f"Username '{username}' already exists."), status_code=400)
+
+        pwd_hash = hash_password(password)
+        await manager.storage.create_user(
+            username=username,
+            password_hash=pwd_hash,
+            role=role,
+            email=email,
+            tenant_id=manager.tenant_id,
+        )
+        users = await manager.storage.fetch_users(tenant_id=manager.tenant_id)
+        return HTMLResponse(users_page(users, user, base, success=f"User '{username}' created successfully."))
+
+    # ------------------------------------------------------------------
+    # Root redirect & Prompt List
     # ------------------------------------------------------------------
 
     @router.get("/", response_class=HTMLResponse)
     async def root(request: Request):
+        auth_redirect = _check_auth(request, min_role="viewer")
+        if auth_redirect:
+            return auth_redirect
         return RedirectResponse(f"{_base(request)}/list")
-
-    # ------------------------------------------------------------------
-    # Prompt list
-    # ------------------------------------------------------------------
 
     @router.get("/list", response_class=HTMLResponse)
     async def list_prompts(request: Request):
-        prompts = await fetch_all_prompts(manager.db_path)
-        return HTMLResponse(prompt_list(prompts, manager.protected_mode, _base(request)))
+        auth_redirect = _check_auth(request, min_role="viewer")
+        if auth_redirect:
+            return auth_redirect
+        user = _get_user(request)
+        prompts = await manager.storage.fetch_all_prompts(tenant_id=manager.tenant_id)
+        return HTMLResponse(prompt_list(prompts, manager.protected_mode, _base(request), user=user))
 
     # ------------------------------------------------------------------
     # Prompt detail
@@ -73,18 +160,25 @@ def build_router(manager: "PromptManager") -> APIRouter:
 
     @router.get("/detail/{name}", response_class=HTMLResponse)
     async def detail(name: str, request: Request):
-        versions = await fetch_prompt_versions(manager.db_path, name)
-        return HTMLResponse(prompt_detail(name, versions, manager.protected_mode, _base(request)))
+        auth_redirect = _check_auth(request, min_role="viewer")
+        if auth_redirect:
+            return auth_redirect
+        user = _get_user(request)
+        versions = await manager.storage.fetch_prompt_versions(name, tenant_id=manager.tenant_id)
+        return HTMLResponse(prompt_detail(name, versions, manager.protected_mode, _base(request), user=user))
 
     # ------------------------------------------------------------------
-    # Edit / create
+    # Edit / Create
     # ------------------------------------------------------------------
 
     @router.get("/edit/__new__", response_class=HTMLResponse)
     async def new_prompt_form(request: Request):
+        auth_redirect = _check_auth(request, min_role="editor")
+        if auth_redirect:
+            return auth_redirect
+        user = _get_user(request)
         return HTMLResponse(
-            edit_page("__new__", "", manager.protected_mode, manager.has_llm,
-                      _base(request), is_new=True)
+            edit_page("__new__", "", manager.protected_mode, manager.has_llm, _base(request), is_new=True, user=user)
         )
 
     @router.post("/edit/__new__", response_class=HTMLResponse)
@@ -97,28 +191,37 @@ def build_router(manager: "PromptManager") -> APIRouter:
         set_active: str = Form("1"),
         password: Optional[str] = Form(None),
     ):
+        auth_redirect = _check_auth(request, min_role="editor")
+        if auth_redirect:
+            return auth_redirect
+
         base = _base(request)
+        user = _get_user(request)
         tag = tag or None
         do_activate = set_active == "1"
+        creator = edited_by or (user.get("username") if user else "") or "anonymous"
 
         if manager.protected_mode and (do_activate or tag == "prod"):
             if not _check_password(password):
                 return HTMLResponse(
-                    edit_page("__new__", content, manager.protected_mode, manager.has_llm,
-                              base, error="Incorrect password.", is_new=True)
+                    edit_page("__new__", content, manager.protected_mode, manager.has_llm, base, error="Incorrect password.", is_new=True, user=user)
                 )
 
-        await create_version(manager.db_path, prompt_name, content, edited_by, tag, do_activate)
+        await manager.storage.create_version(prompt_name, content, creator, tag, do_activate, tenant_id=manager.tenant_id)
         manager.cache.invalidate(prompt_name)
         return RedirectResponse(f"{base}/detail/{prompt_name}", status_code=303)
 
     @router.get("/edit/{name}", response_class=HTMLResponse)
     async def edit_form(name: str, request: Request):
-        versions = await fetch_prompt_versions(manager.db_path, name)
+        auth_redirect = _check_auth(request, min_role="editor")
+        if auth_redirect:
+            return auth_redirect
+        user = _get_user(request)
+        versions = await manager.storage.fetch_prompt_versions(name, tenant_id=manager.tenant_id)
         active = next((v for v in versions if v["is_active"]), None)
         current = active["content"] if active else ""
         return HTMLResponse(
-            edit_page(name, current, manager.protected_mode, manager.has_llm, _base(request))
+            edit_page(name, current, manager.protected_mode, manager.has_llm, _base(request), user=user)
         )
 
     @router.post("/edit/{name}", response_class=HTMLResponse)
@@ -131,18 +234,23 @@ def build_router(manager: "PromptManager") -> APIRouter:
         set_active: str = Form("1"),
         password: Optional[str] = Form(None),
     ):
+        auth_redirect = _check_auth(request, min_role="editor")
+        if auth_redirect:
+            return auth_redirect
+
         base = _base(request)
+        user = _get_user(request)
         tag = tag or None
         do_activate = set_active == "1"
+        editor_name = edited_by or (user.get("username") if user else "") or "anonymous"
 
         if manager.protected_mode and (do_activate or tag == "prod"):
             if not _check_password(password):
                 return HTMLResponse(
-                    edit_page(name, content, manager.protected_mode, manager.has_llm,
-                              base, error="Incorrect password.")
+                    edit_page(name, content, manager.protected_mode, manager.has_llm, base, error="Incorrect password.", user=user)
                 )
 
-        await create_version(manager.db_path, name, content, edited_by, tag, do_activate)
+        await manager.storage.create_version(name, content, editor_name, tag, do_activate, tenant_id=manager.tenant_id)
         manager.cache.invalidate(name)
         return RedirectResponse(f"{base}/detail/{name}", status_code=303)
 
@@ -153,18 +261,23 @@ def build_router(manager: "PromptManager") -> APIRouter:
     @router.post("/activate/{name}/{version_id}", response_class=HTMLResponse)
     async def activate_version(
         name: str,
-        version_id: int,
+        version_id: str,
         request: Request,
         password: Optional[str] = Form(None),
     ):
+        auth_redirect = _check_auth(request, min_role="editor")
+        if auth_redirect:
+            return auth_redirect
+
         base = _base(request)
+        user = _get_user(request)
         if manager.protected_mode and not _check_password(password):
-            versions = await fetch_prompt_versions(manager.db_path, name)
+            versions = await manager.storage.fetch_prompt_versions(name, tenant_id=manager.tenant_id)
             return HTMLResponse(
-                prompt_detail(name, versions, manager.protected_mode, base)
+                prompt_detail(name, versions, manager.protected_mode, base, user=user)
                 .replace("</nav>", '</nav><div class="container"><div class="error">Incorrect password.</div></div>')
             )
-        await set_active_version(manager.db_path, version_id)
+        await manager.storage.set_active_version(version_id, tenant_id=manager.tenant_id)
         manager.cache.invalidate(name)
         return RedirectResponse(f"{base}/detail/{name}", status_code=303)
 
@@ -174,40 +287,60 @@ def build_router(manager: "PromptManager") -> APIRouter:
 
     @router.post("/delete/{name}")
     async def delete_prompt(name: str, request: Request, password: Optional[str] = Form(None)):
+        auth_redirect = _check_auth(request, min_role="admin")
+        if auth_redirect:
+            return auth_redirect
+
         base = _base(request)
         if manager.protected_mode and not _check_password(password):
             return JSONResponse({"error": "Incorrect password."}, status_code=403)
-        await soft_delete_prompt(manager.db_path, name)
+        await manager.storage.soft_delete_prompt(name, tenant_id=manager.tenant_id)
         manager.cache.invalidate(name)
         return RedirectResponse(f"{base}/list", status_code=303)
 
     # ------------------------------------------------------------------
-    # Diff
+    # Diff & A/B test & Logs
     # ------------------------------------------------------------------
 
     @router.get("/diff/{name}", response_class=HTMLResponse)
-    async def diff_view(name: str, request: Request, v1: Optional[int] = None, v2: Optional[int] = None):
-        versions = await fetch_prompt_versions(manager.db_path, name)
-        ver1 = await fetch_version_by_id(manager.db_path, v1) if v1 else None
-        ver2 = await fetch_version_by_id(manager.db_path, v2) if v2 else None
-        return HTMLResponse(diff_page(name, versions, ver1, ver2, manager.protected_mode, _base(request)))
-
-    # ------------------------------------------------------------------
-    # A/B test
-    # ------------------------------------------------------------------
+    async def diff_view(name: str, request: Request, v1: Optional[str] = None, v2: Optional[str] = None):
+        auth_redirect = _check_auth(request, min_role="viewer")
+        if auth_redirect:
+            return auth_redirect
+        user = _get_user(request)
+        versions = await manager.storage.fetch_prompt_versions(name, tenant_id=manager.tenant_id)
+        ver1 = await manager.storage.fetch_version_by_id(v1, tenant_id=manager.tenant_id) if v1 else None
+        ver2 = await manager.storage.fetch_version_by_id(v2, tenant_id=manager.tenant_id) if v2 else None
+        return HTMLResponse(diff_page(name, versions, ver1, ver2, manager.protected_mode, _base(request), user=user))
 
     @router.get("/test/{name}", response_class=HTMLResponse)
     async def ab_test(name: str, request: Request):
-        versions = await fetch_prompt_versions(manager.db_path, name)
-        return HTMLResponse(ab_test_page(name, versions, manager.protected_mode, manager.has_llm, _base(request)))
+        auth_redirect = _check_auth(request, min_role="viewer")
+        if auth_redirect:
+            return auth_redirect
+        user = _get_user(request)
+        versions = await manager.storage.fetch_prompt_versions(name, tenant_id=manager.tenant_id)
+        return HTMLResponse(ab_test_page(name, versions, manager.protected_mode, manager.has_llm, _base(request), user=user))
+
+    @router.get("/logs", response_class=HTMLResponse)
+    async def view_logs(request: Request, prompt: Optional[str] = None):
+        auth_redirect = _check_auth(request, min_role="viewer")
+        if auth_redirect:
+            return auth_redirect
+        user = _get_user(request)
+        logs = await manager.storage.fetch_logs(prompt_name=prompt, limit=100, tenant_id=manager.tenant_id)
+        return HTMLResponse(logs_page(logs, manager.protected_mode, _base(request), prompt_filter=prompt or "", user=user))
 
     # ------------------------------------------------------------------
-    # Export as JSON
+    # Export / Import JSON
     # ------------------------------------------------------------------
 
     @router.get("/export")
-    async def export_json():
-        data = await export_prompts(manager.db_path)
+    async def export_json(request: Request):
+        auth_redirect = _check_auth(request, min_role="viewer")
+        if auth_redirect:
+            return auth_redirect
+        data = await manager.storage.export_prompts(tenant_id=manager.tenant_id)
         content = json.dumps(data, indent=2, ensure_ascii=False)
         return StreamingResponse(
             iter([content]),
@@ -215,133 +348,64 @@ def build_router(manager: "PromptManager") -> APIRouter:
             headers={"Content-Disposition": "attachment; filename=prompts.json"},
         )
 
-    # ------------------------------------------------------------------
-    # Import from JSON
-    # ------------------------------------------------------------------
-
     @router.get("/import", response_class=HTMLResponse)
     async def import_form(request: Request):
+        auth_redirect = _check_auth(request, min_role="editor")
+        if auth_redirect:
+            return auth_redirect
+
+        user = _get_user(request)
         base = _base(request)
         body = f"""
 <h1>Import Prompts</h1>
 <div class="card">
-  <p class="text-muted" style="margin-bottom:16px;">
-    Upload a JSON file in the format <code>{{"prompt_name": "prompt content", ...}}</code>.
-    Each prompt will be imported as a new version and set active.
-    Existing prompts are not overwritten - a new version is created instead.
-  </p>
+  <p class="text-muted" style="margin-bottom:16px;">Upload a JSON file formatted as <code>{{"prompt_name": "prompt content"}}</code>.</p>
   <form method="post" action="{base}/import" enctype="multipart/form-data">
     <div class="form-group">
-      <label for="imported_by">Imported By</label>
-      <input type="text" id="imported_by" name="imported_by" placeholder="your name or team">
-    </div>
-    <div class="form-group">
       <label for="file">JSON File</label>
-      <input type="file" id="file" name="file" accept=".json"
-             style="background:#0f1117;border:1px solid #2d3148;border-radius:6px;color:#e2e8f0;padding:8px 12px;width:100%;">
+      <input type="file" id="file" name="file" accept=".json">
     </div>
-    <div class="flex">
+    <div class="flex mt-16">
       <button type="submit" class="btn btn-primary">Import</button>
       <a href="{base}/list" class="btn btn-ghost">Cancel</a>
     </div>
   </form>
 </div>"""
         from .templates import _layout
-        return HTMLResponse(_layout("Import Prompts", body, manager.protected_mode, base))
+        return HTMLResponse(_layout("Import Prompts", body, manager.protected_mode, base, user=user))
 
     @router.post("/import", response_class=HTMLResponse)
-    async def import_json(
+    async def import_json_submit(
         request: Request,
         file: UploadFile = File(...),
-        imported_by: str = Form("import"),
     ):
+        auth_redirect = _check_auth(request, min_role="editor")
+        if auth_redirect:
+            return auth_redirect
+
         base = _base(request)
+        user = _get_user(request)
         raw = await file.read()
         try:
             data = json.loads(raw)
             if not isinstance(data, dict):
-                raise ValueError("JSON must be an object at the top level.")
-            # Validate all values are strings
-            bad = [k for k, v in data.items() if not isinstance(v, str)]
-            if bad:
-                raise ValueError(f"All values must be strings. Bad keys: {', '.join(bad)}")
-        except (json.JSONDecodeError, ValueError) as exc:
+                raise ValueError("JSON must be a dictionary.")
+        except Exception as exc:
             from .templates import _layout
-            body = f"""<h1>Import Prompts</h1>
-<div class="error">Invalid JSON: {str(exc)}</div>
-<a href="{base}/import" class="btn btn-ghost">← Try Again</a>"""
-            return HTMLResponse(_layout("Import Prompts", body, manager.protected_mode, base), status_code=400)
+            return HTMLResponse(_layout("Import Prompts", f'<div class="error">Invalid JSON: {exc}</div>', manager.protected_mode, base, user=user), status_code=400)
 
-        result = await import_prompts(manager.db_path, data, imported_by=imported_by)
-
-        # Invalidate cache for all imported prompts
+        imported_by = user.get("username") if user else "import"
+        result = await manager.storage.import_prompts(data, imported_by=imported_by, tenant_id=manager.tenant_id)
         for name in data:
             manager.cache.invalidate(name)
 
         from .templates import _layout
-        created_list = "".join(f"<li>{n}</li>" for n in result["created"]) or "<li>none</li>"
-        updated_list = "".join(f"<li>{n}</li>" for n in result["updated"]) or "<li>none</li>"
         body = f"""
 <h1>Import Complete</h1>
 <div class="card">
-  <h2>Created ({len(result['created'])})</h2>
-  <ul style="padding-left:20px;color:#9ae6b4;">{created_list}</ul>
-  <h2 style="margin-top:16px;">Updated ({len(result['updated'])})</h2>
-  <ul style="padding-left:20px;color:#fbd38d;">{updated_list}</ul>
+  <p style="color:#9ae6b4;">Created {len(result['created'])} prompts. Updated {len(result['updated'])} prompts.</p>
 </div>
-<div class="flex mt-16">
-  <a href="{base}/list" class="btn btn-primary">View All Prompts</a>
-  <a href="{base}/import" class="btn btn-ghost">Import More</a>
-</div>"""
-        return HTMLResponse(_layout("Import Complete", body, manager.protected_mode, base))
-
-    # ------------------------------------------------------------------
-    # Logs
-    # ------------------------------------------------------------------
-
-    @router.get("/logs", response_class=HTMLResponse)
-    async def view_logs(request: Request, prompt: Optional[str] = None):
-        logs = await fetch_logs(manager.db_path, prompt_name=prompt, limit=100)
-        return HTMLResponse(logs_page(logs, manager.protected_mode, _base(request), prompt_filter=prompt or ""))
-
-    # ------------------------------------------------------------------
-    # API: LLM suggest
-    # ------------------------------------------------------------------
-
-    @router.post("/api/suggest")
-    async def suggest(request: Request):
-        if not manager.has_llm:
-            return JSONResponse({"detail": "LLM not configured."}, status_code=403)
-        body = await request.json()
-        content = body.get("content", "").strip()
-        if not content:
-            return JSONResponse({"detail": "content is required."}, status_code=400)
-        try:
-            suggestion = await manager.llm.suggest(content)
-            return JSONResponse({"suggestion": suggestion})
-        except Exception as exc:
-            return JSONResponse({"detail": f"LLM error: {exc}"}, status_code=502)
-
-    # ------------------------------------------------------------------
-    # API: A/B run
-    # ------------------------------------------------------------------
-
-    @router.post("/api/run")
-    async def ab_run(request: Request):
-        if not manager.has_llm:
-            return JSONResponse({"detail": "LLM not configured."}, status_code=403)
-        body = await request.json()
-        version_id = body.get("version_id")
-        input_text = body.get("input", "").strip()
-        if not version_id or not input_text:
-            return JSONResponse({"detail": "version_id and input are required."}, status_code=400)
-        version = await fetch_version_by_id(manager.db_path, version_id)
-        if not version:
-            return JSONResponse({"detail": "Version not found."}, status_code=404)
-        try:
-            output = await manager.llm.run(version["content"], input_text)
-            return JSONResponse({"output": output})
-        except Exception as exc:
-            return JSONResponse({"detail": f"LLM error: {exc}"}, status_code=502)
+<div class="flex mt-16"><a href="{base}/list" class="btn btn-primary">View All Prompts</a></div>"""
+        return HTMLResponse(_layout("Import Complete", body, manager.protected_mode, base, user=user))
 
     return router

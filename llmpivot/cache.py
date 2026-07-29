@@ -6,17 +6,23 @@ Serves stale values if DB is unreachable.
 import asyncio
 import logging
 import time
-from typing import Optional
+from typing import Optional, Union
 
-from .db import fetch_active_version
+from .storage import BaseStorage, SQLiteStorage
 
 logger = logging.getLogger("llmpivot.cache")
 
 
 class PromptCache:
-    def __init__(self, db_path: str, ttl: int):
-        self._db_path = db_path
+    def __init__(self, storage: Union[BaseStorage, str], ttl: int, tenant_id: str = "default"):
+        if isinstance(storage, str):
+            self.storage = SQLiteStorage(storage)
+            self.storage.init_db_sync()
+        else:
+            self.storage = storage
+
         self._ttl = ttl
+        self._tenant_id = tenant_id
         # { name: {"content": str, "version_id": int, "fetched_at": float} }
         self._store: dict[str, dict] = {}
         self._task: Optional[asyncio.Task] = None
@@ -24,7 +30,11 @@ class PromptCache:
     def start(self) -> None:
         """Start background refresh loop. Call once from async context."""
         if self._task is None or self._task.done():
-            self._task = asyncio.create_task(self._refresh_loop())
+            try:
+                loop = asyncio.get_running_loop()
+                self._task = loop.create_task(self._refresh_loop())
+            except RuntimeError:
+                pass
 
     def stop(self) -> None:
         if self._task:
@@ -45,7 +55,7 @@ class PromptCache:
 
     async def _fetch_and_store(self, name: str) -> None:
         try:
-            row = await fetch_active_version(self._db_path, name)
+            row = await self.storage.fetch_active_version(name, tenant_id=self._tenant_id)
             if row:
                 self._store[name] = {
                     "content": row["content"],
@@ -54,7 +64,6 @@ class PromptCache:
                 }
         except Exception as exc:
             logger.warning("Cache refresh failed for '%s': %s", name, exc)
-            # Keep stale value - do not evict
 
     def invalidate(self, name: str) -> None:
         """Force next get() to re-fetch from DB."""

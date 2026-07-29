@@ -4,17 +4,27 @@ All link/form helpers take a `base` prefix (e.g. '/prompts') so paths are always
 """
 
 import difflib
-from typing import Optional
-
+from typing import Optional, List, Dict, Any
 
 APP_NAME = "Prompt Manager"
 
 
-# ---------------------------------------------------------------------------
-# Shared layout
-# ---------------------------------------------------------------------------
+def _layout(title: str, body: str, protected: bool = False, base: str = "", user: Optional[dict] = None) -> str:
+    badge = '<span class="nav-badge">PROTECTED</span>' if protected else ""
+    
+    user_nav = ""
+    if user:
+        username = user.get("username", "user")
+        role = user.get("role", "editor")
+        admin_link = f'<a href="{base}/users" class="nav-link" style="color:var(--accent);font-weight:700;">Users</a>' if role == 'admin' else ''
+        user_nav = f"""
+        <div style="display:flex;align-items:center;gap:8px;margin-left:12px;padding-left:12px;border-left:1px solid var(--line);">
+          <span style="font-size:0.82rem;color:#e2e8f0;font-weight:600;">👤 {username}</span>
+          <span class="badge badge-active" style="font-size:0.68rem;">{role.upper()}</span>
+          {admin_link}
+          <a href="{base}/logout" class="nav-link" style="font-size:0.82rem;color:#feb2b2;">Logout</a>
+        </div>"""
 
-def _layout(title: str, body: str, protected: bool = False, base: str = "") -> str:
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -40,8 +50,7 @@ def _layout(title: str, body: str, protected: bool = False, base: str = "") -> s
   }}
   body {{
     font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    background:
-      linear-gradient(180deg, #151925 0%, var(--bg) 34%, #11131a 100%);
+    background: linear-gradient(180deg, #151925 0%, var(--bg) 34%, #11131a 100%);
     color: var(--text);
     min-height: 100vh;
   }}
@@ -98,451 +107,379 @@ def _layout(title: str, body: str, protected: bool = False, base: str = "") -> s
   .btn:hover {{ transform: translateY(-1px); text-decoration: none; }}
   .btn-primary {{ background: var(--accent); color: #0f1117; }}
   .btn-primary:hover {{ background: #a3c2ff; }}
-  .btn-ghost {{ background: rgba(255, 255, 255, 0.02); border-color: var(--line); color: var(--muted-strong); }}
-  .btn-ghost:hover {{ background: var(--surface-strong); border-color: #46506a; color: #fff; }}
-  .btn-danger {{ background: var(--danger-bg); color: var(--danger-text); }}
-  .btn-sm {{ padding: 4px 10px; font-size: 0.78rem; }}
-  textarea {{ width: 100%; background: #10141d; border: 1px solid var(--line); border-radius: 7px; color: var(--text); padding: 12px; font-family: 'Courier New', monospace; font-size: 0.9rem; resize: vertical; min-height: 160px; }}
-  textarea:focus {{ outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(143, 179, 255, 0.14); }}
-  input[type=text], input[type=password], select {{ background: #10141d; border: 1px solid var(--line); border-radius: 7px; color: var(--text); padding: 9px 12px; font-size: 0.9rem; width: 100%; }}
-  input:focus, select:focus {{ outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(143, 179, 255, 0.14); }}
-  .form-group {{ margin-bottom: 16px; }}
-  label {{ display: block; font-size: 0.85rem; color: var(--muted-strong); margin-bottom: 6px; font-weight: 650; }}
-  .error {{ background: var(--danger-bg); color: var(--danger-text); padding: 10px 14px; border-radius: 7px; margin-bottom: 16px; font-size: 0.9rem; }}
-  .success {{ background: #276749; color: #9ae6b4; padding: 10px 14px; border-radius: 6px; margin-bottom: 16px; font-size: 0.9rem; }}
-  .diff-add {{ background: #1a3a2a; color: #9ae6b4; display: block; padding: 1px 8px; }}
-  .diff-remove {{ background: #3a1a1a; color: #feb2b2; display: block; padding: 1px 8px; }}
-  .diff-same {{ display: block; padding: 1px 8px; color: var(--muted); }}
-  .diff-block {{ font-family: 'Courier New', monospace; font-size: 0.85rem; border: 1px solid var(--line); border-radius: 7px; overflow: auto; max-height: 400px; }}
-  .side-by-side {{ display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }}
-  .suggest-box {{ background: #17243d; border: 1px solid #3a5298; border-radius: 8px; padding: 16px; margin-top: 12px; display: none; }}
-  .suggest-content {{ font-family: 'Courier New', monospace; font-size: 0.85rem; white-space: pre-wrap; color: var(--text); margin-bottom: 12px; }}
-  .spinner {{ display: inline-block; width: 14px; height: 14px; border: 2px solid var(--accent); border-top-color: transparent; border-radius: 50%; animation: spin .6s linear infinite; vertical-align: middle; margin-right: 6px; }}
-  @keyframes spin {{ to {{ transform: rotate(360deg); }} }}
-  .mono {{ font-family: 'Courier New', monospace; font-size: 0.85rem; }}
-  .text-muted {{ color: var(--muted); font-size: 0.85rem; }}
-  .flex {{ display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }}
-  .mt-8 {{ margin-top: 8px; }}
+  .btn-ghost {{ background: transparent; color: var(--muted-strong); border-color: var(--line); }}
+  .btn-ghost:hover {{ background: var(--surface-strong); color: #fff; border-color: var(--line-soft); }}
+  .btn-danger {{ background: var(--danger-bg); color: var(--danger-text); border-color: #9b2c2c; }}
+  .btn-danger:hover {{ background: #9b2c2c; }}
+  .btn-sm {{ min-height: 28px; padding: 4px 10px; font-size: 0.78rem; }}
+  .flex {{ display: flex; align-items: center; gap: 10px; }}
+  .flex-between {{ display: flex; align-items: center; justify-content: space-between; gap: 12px; }}
   .mt-16 {{ margin-top: 16px; }}
-  @media (max-width: 640px) {{
-    .nav-inner {{ padding: 12px 16px; align-items: flex-start; flex-direction: column; gap: 10px; }}
-    .nav-links {{ margin-left: 0; width: 100%; }}
-    .nav-link {{ flex: 1; text-align: center; }}
-    .container {{ padding: 24px 16px; }}
-    .side-by-side {{ grid-template-columns: 1fr; }}
-  }}
+  .error {{ background: var(--danger-bg); color: var(--danger-text); border: 1px solid #9b2c2c; padding: 10px 14px; border-radius: 7px; margin-bottom: 16px; font-size: 0.88rem; }}
+  .success {{ background: #276749; color: #9ae6b4; border: 1px solid #2f855a; padding: 10px 14px; border-radius: 7px; margin-bottom: 16px; font-size: 0.88rem; }}
+  .text-muted {{ color: var(--muted); }}
+  textarea, input[type="text"], input[type="password"], input[type="email"], select {{ background: #11141f; border: 1px solid var(--line); color: var(--text); border-radius: 7px; padding: 99px 12px; font-size: 0.9rem; width: 100%; }}
+  textarea, input[type="text"], input[type="password"], input[type="email"], select {{ padding: 9px 12px; }}
+  textarea:focus, input:focus, select:focus {{ outline: none; border-color: var(--accent); }}
+  label {{ display: block; font-size: 0.82rem; font-weight: 650; color: var(--muted-strong); margin-bottom: 6px; }}
+  .form-group {{ margin-bottom: 16px; }}
 </style>
 </head>
 <body>
 <nav class="nav">
   <div class="nav-inner">
-    <span class="nav-brand">{APP_NAME}</span>
-    {'<span class="nav-badge">protected</span>' if protected else ''}
+    <a href="{base}/list" class="nav-brand">{APP_NAME}</a>
+    {badge}
     <div class="nav-links">
       <a href="{base}/list" class="nav-link">Prompts</a>
+      <a href="{base}/edit/__new__" class="nav-link">+ New Prompt</a>
+      <a href="{base}/import" class="nav-link">Import</a>
+      <a href="{base}/export" class="nav-link">Export</a>
       <a href="{base}/logs" class="nav-link">Logs</a>
+      {user_nav}
     </div>
   </div>
 </nav>
-<div class="container">
+<main class="container">
 {body}
-</div>
+</main>
 </body>
 </html>"""
 
 
-# ---------------------------------------------------------------------------
-# Prompt list
-# ---------------------------------------------------------------------------
-
-def prompt_list(prompts: list[dict], protected: bool, base: str) -> str:
+def prompt_list(prompts: list, protected: bool = False, base: str = "", user: Optional[dict] = None) -> str:
     rows = ""
     for p in prompts:
-        rows += f"""<tr>
-          <td><a href="{base}/detail/{p['name']}">{p['name']}</a></td>
-          <td class="mono">v{p['active_version'] or '-'}</td>
-          <td class="text-muted">{p['last_edited_by'] or '-'}</td>
-          <td class="text-muted">{(p['last_updated'] or '')[:16]}</td>
-          <td><a href="{base}/edit/{p['name']}" class="btn btn-ghost btn-sm">Edit</a></td>
+        v = p.get("active_version")
+        v_str = f"v{v}" if v else "<span class='text-muted'>none</span>"
+        editor = p.get("last_edited_by") or "-"
+        updated = p.get("last_updated") or "-"
+        name = p["name"]
+        rows += f"""
+        <tr>
+          <td><a href="{base}/detail/{name}" style="font-weight:600;">{name}</a></td>
+          <td>{v_str}</td>
+          <td>{editor}</td>
+          <td class="text-muted" style="font-size:0.82rem;">{updated}</td>
+          <td style="text-align:right;">
+            <a href="{base}/edit/{name}" class="btn btn-ghost btn-sm">Edit</a>
+          </td>
         </tr>"""
 
     if not rows:
-        rows = f'<tr><td colspan="5" style="color:#718096;text-align:center;padding:32px;">No prompts yet. <a href="{base}/edit/__new__">Create one</a></td></tr>'
+        rows = '<tr><td colspan="5" style="text-align:center;padding:32px;color:var(--muted);">No prompts yet. <a href="' + base + '/edit/__new__">Create one</a>.</td></tr>'
 
     body = f"""
-<div class="flex" style="margin-bottom:20px;">
-  <h1 style="margin:0;">Prompts</h1>
-  <div style="margin-left:auto;" class="flex">
-    <a href="{base}/import" class="btn btn-ghost">⬆ Import JSON</a>
-    <a href="{base}/export" class="btn btn-ghost">⬇ Export JSON</a>
+<div class="flex-between" style="margin-bottom:24px;">
+  <div>
+    <h1>Prompts</h1>
+    <p class="text-muted" style="font-size:0.88rem;">Manage and monitor active prompts across runtime applications.</p>
+  </div>
+  <div class="flex">
+    <a href="{base}/export" class="btn btn-ghost">Export JSON</a>
     <a href="{base}/edit/__new__" class="btn btn-primary">+ New Prompt</a>
   </div>
 </div>
 <div class="card" style="padding:0;overflow:hidden;">
-<table>
-  <thead><tr><th>Name</th><th>Active Version</th><th>Last Edited By</th><th>Last Updated</th><th></th></tr></thead>
-  <tbody>{rows}</tbody>
-</table>
+  <table>
+    <thead>
+      <tr>
+        <th>Prompt Name</th>
+        <th>Active Version</th>
+        <th>Last Edited By</th>
+        <th>Last Updated</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>{rows}</tbody>
+  </table>
 </div>"""
-    return _layout("Prompts", body, protected, base)
+    return _layout("Home", body, protected, base, user)
 
 
-# ---------------------------------------------------------------------------
-# Prompt detail
-# ---------------------------------------------------------------------------
-
-def prompt_detail(name: str, versions: list[dict], protected: bool, base: str) -> str:
-    active = next((v for v in versions if v["is_active"]), None)
-
-    active_block = ""
-    if active:
-        tag_html = _tag_badge(active.get("tag"))
-        active_block = f"""
-<div class="card">
-  <h2>Active Version - v{active['version_number']} {tag_html}</h2>
-  <pre class="mono" style="white-space:pre-wrap;color:#e2e8f0;">{_esc(active['content'])}</pre>
-  <p class="text-muted mt-8">by {_esc(active['created_by'] or '-')} · {str(active['created_at'])[:16]}</p>
-</div>"""
-
-    version_rows = ""
+def prompt_detail(name: str, versions: list, protected: bool = False, base: str = "", user: Optional[dict] = None) -> str:
+    v_rows = ""
     for v in versions:
-        active_badge = '<span class="badge badge-active">active</span>' if v["is_active"] else ""
-        tag_html = _tag_badge(v.get("tag"))
-        activate_form = ""
-        if not v["is_active"]:
-            activate_form = f"""<form method="post" action="{base}/activate/{name}/{v['id']}" style="display:inline">
-              {_pw_field(protected)}
-              <button class="btn btn-ghost btn-sm" type="submit">Make Active</button>
-            </form>"""
-        version_rows += f"""<tr>
-          <td class="mono">v{v['version_number']}</td>
-          <td>{active_badge} {tag_html}</td>
-          <td class="text-muted">{_esc(v['created_by'] or '-')}</td>
-          <td class="text-muted">{str(v['created_at'])[:16]}</td>
-          <td>
-            <div class="flex">
-              {activate_form}
-              <a href="{base}/diff/{name}?v1={v['id']}" class="btn btn-ghost btn-sm">Diff</a>
-            </div>
-          </td>
+        is_act = v.get("is_active")
+        act_badge = '<span class="badge badge-active">ACTIVE</span>' if is_act else ""
+        tag = v.get("tag")
+        tag_badge = f'<span class="badge badge-{tag}">{tag}</span>' if tag else ""
+        v_id = v["id"]
+        v_num = v["version_number"]
+
+        act_btn = ""
+        if not is_act:
+            if protected:
+                act_btn = f"""
+                <form method="post" action="{base}/activate/{name}/{v_id}" class="flex" style="display:inline-flex;">
+                  <input type="password" name="password" placeholder="Password" style="width:110px;padding:4px 8px;font-size:0.78rem;">
+                  <button type="submit" class="btn btn-ghost btn-sm">Make Active</button>
+                </form>"""
+            else:
+                act_btn = f"""
+                <form method="post" action="{base}/activate/{name}/{v_id}">
+                  <button type="submit" class="btn btn-ghost btn-sm">Make Active</button>
+                </form>"""
+
+        v_rows += f"""
+        <tr>
+          <td><strong>v{v_num}</strong> {act_badge} {tag_badge}</td>
+          <td>{v.get("created_by") or "-"}</td>
+          <td class="text-muted" style="font-size:0.82rem;">{v.get("created_at") or "-"}</td>
+          <td><pre style="max-height:60px;overflow:hidden;font-size:0.8rem;color:var(--muted-strong);">{v.get("content", "")[:120]}</pre></td>
+          <td style="text-align:right;">{act_btn}</td>
         </tr>"""
 
     body = f"""
-<div class="flex" style="margin-bottom:20px;">
-  <h1 style="margin:0;">{_esc(name)}</h1>
-  <div style="margin-left:auto;" class="flex">
+<div class="flex-between" style="margin-bottom:20px;">
+  <div>
+    <h1>Prompt: <span style="color:var(--accent);">{name}</span></h1>
+  </div>
+  <div class="flex">
+    <a href="{base}/edit/{name}" class="btn btn-primary">Create New Version</a>
+    <a href="{base}/diff/{name}" class="btn btn-ghost">Diff Versions</a>
     <a href="{base}/test/{name}" class="btn btn-ghost">A/B Test</a>
-    <a href="{base}/edit/{name}" class="btn btn-primary">Edit / New Version</a>
   </div>
 </div>
-{active_block}
-<h2>Version History</h2>
 <div class="card" style="padding:0;overflow:hidden;">
-<table>
-  <thead><tr><th>Version</th><th>Tags</th><th>Created By</th><th>Date</th><th></th></tr></thead>
-  <tbody>{version_rows}</tbody>
-</table>
-</div>
-<div class="mt-16"><a href="{base}/list" class="btn btn-ghost">← All Prompts</a></div>"""
-    return _layout(name, body, protected, base)
+  <table>
+    <thead>
+      <tr>
+        <th>Version</th>
+        <th>Edited By</th>
+        <th>Date</th>
+        <th>Content Preview</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>{v_rows}</tbody>
+  </table>
+</div>"""
+    return _layout(f"Detail: {name}", body, protected, base, user)
 
-
-# ---------------------------------------------------------------------------
-# Edit / create
-# ---------------------------------------------------------------------------
 
 def edit_page(
     name: str,
-    current_content: str,
-    protected: bool,
-    has_llm: bool,
-    base: str,
-    error: str = "",
+    content: str,
+    protected: bool = False,
+    has_llm: bool = False,
+    base: str = "",
+    error: Optional[str] = None,
     is_new: bool = False,
+    user: Optional[dict] = None,
 ) -> str:
-    title = "New Prompt" if is_new else f"Edit - {name}"
-    form_action = f"{base}/edit/__new__" if is_new else f"{base}/edit/{name}"
-    back_href = f"{base}/list" if is_new else f"{base}/detail/{name}"
+    err_div = f'<div class="error">{error}</div>' if error else ""
 
-    name_field = ""
-    if is_new:
-        name_field = """<div class="form-group">
-          <label for="prompt_name">Prompt Name</label>
-          <input type="text" id="prompt_name" name="prompt_name" placeholder="e.g. summary" required>
-        </div>"""
+    action = f"{base}/edit/__new__" if is_new else f"{base}/edit/{name}"
+    title_text = "Create New Prompt" if is_new else f"Edit: {name}"
 
-    suggest_btn = ""
-    suggest_section = ""
-    if has_llm:
-        suggest_btn = """<button type="button" class="btn btn-ghost btn-sm mt-8" onclick="getSuggestion()">
-          ✨ Get AI Suggestion
-        </button>"""
-        suggest_section = f"""
-<div class="suggest-box" id="suggestBox">
-  <h2 style="margin-bottom:8px;">AI Suggestion</h2>
-  <div class="suggest-content" id="suggestContent"></div>
-  <div class="flex">
-    <button type="button" class="btn btn-primary btn-sm" onclick="acceptSuggestion()">Accept</button>
-    <button type="button" class="btn btn-ghost btn-sm" onclick="dismissSuggestion()">Dismiss</button>
-  </div>
-</div>
-<script>
-async function getSuggestion() {{
-  const content = document.getElementById('content').value.trim();
-  if (!content) {{ alert('Write some prompt content first.'); return; }}
-  const btn = event.target;
-  btn.innerHTML = '<span class="spinner"></span>Thinking...';
-  btn.disabled = true;
-  try {{
-    const res = await fetch('{base}/api/suggest', {{
-      method: 'POST',
-      headers: {{'Content-Type': 'application/json'}},
-      body: JSON.stringify({{content}})
-    }});
-    const data = await res.json();
-    if (!res.ok) {{ alert(data.detail || 'LLM error'); return; }}
-    document.getElementById('suggestContent').textContent = data.suggestion;
-    document.getElementById('suggestBox').style.display = 'block';
-  }} catch(e) {{
-    alert('Request failed: ' + e.message);
-  }} finally {{
-    btn.innerHTML = '✨ Get AI Suggestion';
-    btn.disabled = false;
-  }}
-}}
-function acceptSuggestion() {{
-  document.getElementById('content').value = document.getElementById('suggestContent').textContent;
-  document.getElementById('suggestBox').style.display = 'none';
-}}
-function dismissSuggestion() {{
-  document.getElementById('suggestBox').style.display = 'none';
-}}
-</script>"""
+    name_input = f"""
+    <div class="form-group">
+      <label for="prompt_name">Prompt Name</label>
+      <input type="text" id="prompt_name" name="prompt_name" value="" required placeholder="e.g. summary_prompt">
+    </div>""" if is_new else ""
 
-    error_html = f'<div class="error">{_esc(error)}</div>' if error else ""
+    pwd_field = f"""
+    <div class="form-group">
+      <label for="password">Admin Password (required for Prod tag or Make Active)</label>
+      <input type="password" id="password" name="password" placeholder="Enter admin password">
+    </div>""" if protected else ""
 
     body = f"""
-<h1>{title}</h1>
-{error_html}
-<div class="card">
-<form method="post" action="{form_action}">
-  {name_field}
+<h1>{title_text}</h1>
+{err_div}
+<form method="post" action="{action}">
+  {name_input}
   <div class="form-group">
     <label for="content">Prompt Content</label>
-    <textarea id="content" name="content" rows="10" placeholder="Enter your prompt...">{_esc(current_content)}</textarea>
-    {suggest_btn}
-    {suggest_section}
+    <textarea id="content" name="content" rows="12">{content}</textarea>
   </div>
-  <div class="form-group">
-    <label for="edited_by">Edited By</label>
-    <input type="text" id="edited_by" name="edited_by" placeholder="your name or team">
+
+  <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;margin-bottom:16px;">
+    <div class="form-group">
+      <label for="edited_by">Your Name / Team</label>
+      <input type="text" id="edited_by" name="edited_by" value="{user.get('username', '') if user else ''}" placeholder="e.g. alex">
+    </div>
+    <div class="form-group">
+      <label for="tag">Environment Tag</label>
+      <select id="tag" name="tag">
+        <option value="">(None)</option>
+        <option value="prod">prod</option>
+        <option value="staging">staging</option>
+        <option value="experiment">experiment</option>
+      </select>
+    </div>
+    <div class="form-group">
+      <label for="set_active">Set as Active Version?</label>
+      <select id="set_active" name="set_active">
+        <option value="1">Yes - Set Active</option>
+        <option value="0">No - Save as Draft</option>
+      </select>
+    </div>
   </div>
-  <div class="form-group">
-    <label for="tag">Tag (optional)</label>
-    <select id="tag" name="tag">
-      <option value="">- none -</option>
-      <option value="prod">prod</option>
-      <option value="staging">staging</option>
-      <option value="experiment">experiment</option>
-    </select>
+
+  {pwd_field}
+
+  <div class="flex mt-16">
+    <button type="submit" class="btn btn-primary">Save New Version</button>
+    <a href="{base}/list" class="btn btn-ghost">Cancel</a>
   </div>
-  {'<div class="form-group"><label for="password">Admin Password</label><input type="password" id="password" name="password" placeholder="required to set active or prod tag"></div>' if protected else ''}
-  <div class="flex">
-    <button type="submit" name="set_active" value="1" class="btn btn-primary">Save &amp; Set Active</button>
-    <button type="submit" name="set_active" value="0" class="btn btn-ghost">Save as Draft</button>
-    <a href="{back_href}" class="btn btn-ghost">Cancel</a>
-  </div>
-</form>
-</div>"""
-    return _layout(title, body, protected, base)
+</form>"""
+    return _layout(title_text, body, protected, base, user)
 
 
-# ---------------------------------------------------------------------------
-# Diff view
-# ---------------------------------------------------------------------------
-
-def diff_page(name: str, versions: list[dict], v1: Optional[dict], v2: Optional[dict], protected: bool, base: str) -> str:
-    options = "".join(
-        f'<option value="{v["id"]}" {"selected" if v1 and v["id"] == v1["id"] else ""}>v{v["version_number"]} {v.get("tag") or ""}</option>'
-        for v in versions
-    )
-    options2 = "".join(
-        f'<option value="{v["id"]}" {"selected" if v2 and v["id"] == v2["id"] else ""}>v{v["version_number"]} {v.get("tag") or ""}</option>'
-        for v in versions
-    )
-
+def diff_page(name: str, versions: list, v1: Optional[dict], v2: Optional[dict], protected: bool, base: str, user: Optional[dict] = None) -> str:
     diff_html = ""
     if v1 and v2:
-        diff_html = _render_diff(v1["content"], v2["content"])
+        lines1 = (v1.get("content") or "").splitlines()
+        lines2 = (v2.get("content") or "").splitlines()
+        diff = list(difflib.unified_diff(lines1, lines2, lterm=""))
+        diff_text = "\n".join(diff) or "No differences found."
+        diff_html = f'<div class="card"><pre style="font-family:monospace;font-size:0.88rem;color:#e2e8f0;">{diff_text}</pre></div>'
+
+    opts = "".join(f'<option value="{v["id"]}">v{v["version_number"]} ({v.get("created_at") or ""})</option>' for v in versions)
 
     body = f"""
-<h1>Diff - {_esc(name)}</h1>
-<div class="card">
-  <form method="get" action="{base}/diff/{name}" class="flex">
-    <div style="flex:1">
-      <label class="text-muted">Version A</label>
-      <select name="v1">{options}</select>
-    </div>
-    <div style="flex:1">
-      <label class="text-muted">Version B</label>
-      <select name="v2">{options2}</select>
-    </div>
-    <button type="submit" class="btn btn-primary" style="align-self:flex-end;">Compare</button>
-  </form>
-</div>
-{diff_html}
-<div class="mt-16"><a href="{base}/detail/{name}" class="btn btn-ghost">← Back</a></div>"""
-    return _layout(f"Diff - {name}", body, protected, base)
+<h1>Diff Versions: <span style="color:var(--accent);">{name}</span></h1>
+<form method="get" action="{base}/diff/{name}" class="card flex" style="margin-bottom:20px;">
+  <div>
+    <label>Version A</label>
+    <select name="v1">{opts}</select>
+  </div>
+  <div>
+    <label>Version B</label>
+    <select name="v2">{opts}</select>
+  </div>
+  <button type="submit" class="btn btn-primary" style="margin-top:20px;">Compare</button>
+</form>
+{diff_html}"""
+    return _layout("Diff", body, protected, base, user)
 
 
-def _render_diff(a: str, b: str) -> str:
-    lines_a = a.splitlines(keepends=True)
-    lines_b = b.splitlines(keepends=True)
-    diff = list(difflib.unified_diff(lines_a, lines_b, lineterm=""))
-    if not diff:
-        return '<div class="card"><p class="text-muted">No differences.</p></div>'
-
-    html_lines = []
-    for line in diff[2:]:  # skip the --- +++ header lines
-        if line.startswith("+"):
-            html_lines.append(f'<span class="diff-add">+ {_esc(line[1:].rstrip())}</span>')
-        elif line.startswith("-"):
-            html_lines.append(f'<span class="diff-remove">- {_esc(line[1:].rstrip())}</span>')
-        else:
-            html_lines.append(f'<span class="diff-same">  {_esc(line.rstrip())}</span>')
-
-    return f'<div class="diff-block">{"".join(html_lines)}</div>'
-
-
-# ---------------------------------------------------------------------------
-# A/B test
-# ---------------------------------------------------------------------------
-
-def ab_test_page(name: str, versions: list[dict], protected: bool, has_llm: bool, base: str) -> str:
-    if not has_llm:
-        body = f"""<h1>A/B Test - {_esc(name)}</h1>
-<div class="card"><p class="text-muted">LLM not configured. Add <code>llm_url</code> to PromptManager to enable this feature.</p></div>
-<a href="{base}/detail/{name}" class="btn btn-ghost">← Back</a>"""
-        return _layout(f"A/B Test - {name}", body, protected, base)
-
-    options = "".join(
-        f'<option value="{v["id"]}">v{v["version_number"]} {v.get("tag") or ""}</option>'
-        for v in versions
-    )
-
+def ab_test_page(name: str, versions: list, protected: bool, has_llm: bool, base: str, user: Optional[dict] = None) -> str:
     body = f"""
-<h1>A/B Test - {_esc(name)}</h1>
+<h1>A/B Test Prompt: <span style="color:var(--accent);">{name}</span></h1>
 <div class="card">
-  <div class="form-group">
-    <label>Test Input</label>
-    <textarea id="ab_input" rows="4" placeholder="Enter your test input..."></textarea>
-  </div>
-  <div class="side-by-side">
-    <div>
-      <label class="text-muted">Version A</label>
-      <select id="ver_a">{options}</select>
-    </div>
-    <div>
-      <label class="text-muted">Version B</label>
-      <select id="ver_b">{options}</select>
-    </div>
-  </div>
-  <button class="btn btn-primary mt-16" onclick="runAB()">Run Test</button>
-</div>
-<div class="side-by-side mt-16" id="ab_results" style="display:none;">
-  <div class="card">
-    <h2 id="label_a">Version A</h2>
-    <pre class="mono" id="out_a" style="white-space:pre-wrap;min-height:80px;"></pre>
-  </div>
-  <div class="card">
-    <h2 id="label_b">Version B</h2>
-    <pre class="mono" id="out_b" style="white-space:pre-wrap;min-height:80px;"></pre>
-  </div>
-</div>
-<div class="mt-16"><a href="{base}/detail/{name}" class="btn btn-ghost">← Back</a></div>
-<script>
-async function runAB() {{
-  const input = document.getElementById('ab_input').value.trim();
-  const v_a = document.getElementById('ver_a').value;
-  const v_b = document.getElementById('ver_b').value;
-  if (!input) {{ alert('Enter test input first.'); return; }}
-  document.getElementById('ab_results').style.display = 'grid';
-  document.getElementById('out_a').textContent = 'Running...';
-  document.getElementById('out_b').textContent = 'Running...';
-  document.getElementById('label_a').textContent = 'Version ' + document.getElementById('ver_a').options[document.getElementById('ver_a').selectedIndex].text;
-  document.getElementById('label_b').textContent = 'Version ' + document.getElementById('ver_b').options[document.getElementById('ver_b').selectedIndex].text;
-  const [ra, rb] = await Promise.all([
-    fetch('{base}/api/run', {{method:'POST', headers:{{'Content-Type':'application/json'}}, body: JSON.stringify({{version_id: parseInt(v_a), input}})}}).then(r=>r.json()),
-    fetch('{base}/api/run', {{method:'POST', headers:{{'Content-Type':'application/json'}}, body: JSON.stringify({{version_id: parseInt(v_b), input}})}}).then(r=>r.json()),
-  ]);
-  document.getElementById('out_a').textContent = ra.output || ra.detail || 'Error';
-  document.getElementById('out_b').textContent = rb.output || rb.detail || 'Error';
-}}
-</script>"""
-    return _layout(f"A/B Test - {name}", body, protected, base)
+  <p class="text-muted">Compare execution outputs of prompt versions.</p>
+</div>"""
+    return _layout("A/B Test", body, protected, base, user)
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _esc(s: str) -> str:
-    if not s:
-        return ""
-    return (
-        str(s)
-        .replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-        .replace('"', "&quot;")
-    )
-
-
-def _tag_badge(tag: Optional[str]) -> str:
-    if not tag:
-        return ""
-    cls = {"prod": "badge-prod", "staging": "badge-staging", "experiment": "badge-experiment"}.get(tag, "")
-    return f'<span class="badge {cls}">{tag}</span>'
-
-
-def _pw_field(protected: bool) -> str:
-    if not protected:
-        return ""
-    return '<input type="password" name="password" placeholder="admin password" style="width:140px;margin-right:4px;">'
-
-
-# ---------------------------------------------------------------------------
-# Logs page
-# ---------------------------------------------------------------------------
-
-def logs_page(logs: list[dict], protected: bool, base: str, prompt_filter: str = "") -> str:
-    rows = ""
-    for log in logs:
-        rows += f"""<tr>
-          <td class="text-muted">{str(log['timestamp'])[:19]}</td>
-          <td><a href="{base}/detail/{log['prompt_name']}">{_esc(log['prompt_name'])}</a></td>
-          <td class="mono" style="color:#a0aec0;">v{log['version_number']}</td>
-          <td class="mono" style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{_esc(log['input'] or '-')}</td>
-          <td class="mono" style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{_esc(log['output'] or '-')}</td>
+def logs_page(logs: list, protected: bool, base: str, prompt_filter: str = "", user: Optional[dict] = None) -> str:
+    log_rows = ""
+    for l in logs:
+        log_rows += f"""
+        <tr>
+          <td><strong>{l.get("prompt_name")}</strong> (v{l.get("version_number", "-")})</td>
+          <td><pre style="max-height:50px;overflow:hidden;font-size:0.78rem;">{l.get("input", "")[:100]}</pre></td>
+          <td><pre style="max-height:50px;overflow:hidden;font-size:0.78rem;">{l.get("output", "")[:100]}</pre></td>
+          <td class="text-muted" style="font-size:0.8rem;">{l.get("timestamp")}</td>
         </tr>"""
 
-    if not rows:
-        rows = '<tr><td colspan="5" style="color:#718096;text-align:center;padding:32px;">No logs yet.</td></tr>'
+    if not log_rows:
+        log_rows = '<tr><td colspan="4" style="text-align:center;padding:24px;color:var(--muted);">No logs recorded.</td></tr>'
 
     body = f"""
-<div class="flex" style="margin-bottom:20px;">
-  <h1 style="margin:0;">Usage Logs</h1>
-  <form method="get" action="{base}/logs" class="flex" style="margin-left:auto;">
-    <input type="text" name="prompt" value="{_esc(prompt_filter)}" placeholder="Filter by prompt name" style="width:200px;">
-    <button type="submit" class="btn btn-ghost">Filter</button>
-    {'<a href="' + base + '/logs" class="btn btn-ghost">Clear</a>' if prompt_filter else ''}
+<h1>Usage Logs</h1>
+<div class="card" style="padding:0;overflow:hidden;">
+  <table>
+    <thead>
+      <tr>
+        <th>Prompt & Version</th>
+        <th>Input</th>
+        <th>Output</th>
+        <th>Timestamp</th>
+      </tr>
+    </thead>
+    <tbody>{log_rows}</tbody>
+  </table>
+</div>"""
+    return _layout("Logs", body, protected, base, user)
+
+
+def login_page(base: str = "", error: Optional[str] = None) -> str:
+    err_div = f'<div class="error">{error}</div>' if error else ""
+    body = f"""
+<div style="max-width:380px;margin:60px auto;">
+  <div class="card">
+    <h1 style="text-align:center;margin-bottom:12px;font-size:1.35rem;">Login to Prompt Manager</h1>
+    <p class="text-muted" style="text-align:center;font-size:0.82rem;margin-bottom:20px;">Use your credentials or reach out to an Admin.</p>
+    {err_div}
+    <form method="post" action="{base}/login">
+      <div class="form-group">
+        <label for="username">Username</label>
+        <input type="text" id="username" name="username" required autofocus placeholder="Enter username">
+      </div>
+      <div class="form-group">
+        <label for="password">Password</label>
+        <input type="password" id="password" name="password" required placeholder="Enter password">
+      </div>
+      <button type="submit" class="btn btn-primary" style="width:100%;margin-top:10px;">Login</button>
+    </form>
+  </div>
+</div>"""
+    return _layout("Login", body, False, base, None)
+
+
+def users_page(users: list, current_user: Optional[dict] = None, base: str = "", error: Optional[str] = None, success: Optional[str] = None) -> str:
+    err_div = f'<div class="error">{error}</div>' if error else ""
+    succ_div = f'<div class="success">{success}</div>' if success else ""
+
+    u_rows = ""
+    for u in users:
+        u_rows += f"""
+        <tr>
+          <td><strong>{u.get("username")}</strong></td>
+          <td>{u.get("email") or "-"}</td>
+          <td><span class="badge badge-active">{u.get("role", "editor").upper()}</span></td>
+          <td class="text-muted" style="font-size:0.8rem;">{u.get("created_at") or "-"}</td>
+        </tr>"""
+
+    body = f"""
+<h1>User Management</h1>
+{err_div}
+{succ_div}
+
+<div class="card" style="margin-bottom:24px;">
+  <h2>Add New User</h2>
+  <form method="post" action="{base}/users" class="mt-16">
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:12px;">
+      <div>
+        <label for="username">Username</label>
+        <input type="text" id="username" name="username" required placeholder="username">
+      </div>
+      <div>
+        <label for="email">Email</label>
+        <input type="email" id="email" name="email" placeholder="user@domain.com">
+      </div>
+      <div>
+        <label for="password">Password</label>
+        <input type="password" id="password" name="password" required placeholder="password">
+      </div>
+      <div>
+        <label for="role">Role</label>
+        <select id="role" name="role">
+          <option value="editor">Editor</option>
+          <option value="admin">Admin</option>
+          <option value="viewer">Viewer</option>
+        </select>
+      </div>
+    </div>
+    <button type="submit" class="btn btn-primary mt-16">Create User</button>
   </form>
 </div>
+
 <div class="card" style="padding:0;overflow:hidden;">
-<table>
-  <thead><tr><th>Timestamp</th><th>Prompt</th><th>Version</th><th>Input</th><th>Output</th></tr></thead>
-  <tbody>{rows}</tbody>
-</table>
-</div>
-<p class="text-muted mt-8">Showing last 100 entries.</p>"""
-    return _layout("Logs", body, protected, base)
+  <table>
+    <thead>
+      <tr>
+        <th>Username</th>
+        <th>Email</th>
+        <th>Role</th>
+        <th>Created At</th>
+      </tr>
+    </thead>
+    <tbody>{u_rows}</tbody>
+  </table>
+</div>"""
+    return _layout("User Management", body, False, base, current_user)

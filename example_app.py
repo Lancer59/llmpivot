@@ -12,6 +12,7 @@ manager = PromptManager(
     db_path="prompts.db",
     cache_ttl=5,
     protected_mode=False,
+    auth_mode="rbac"
     # Optional LLM for AI suggestions + A/B testing:
     # llm_url="https://api.openai.com/v1/chat/completions",
     # llm_api_key="sk-...",

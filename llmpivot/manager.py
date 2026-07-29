@@ -1,5 +1,5 @@
 """
-PromptManager - central coordinator.
+PromptManager - central coordinator for llmpivot.
 Initialize once at app startup; get_prompt() uses the singleton.
 """
 
@@ -7,7 +7,7 @@ import asyncio
 import logging
 from typing import Optional
 
-from .db import init_db
+from .storage import BaseStorage, SQLiteStorage, MongoStorage
 from .cache import PromptCache
 from .logger import PromptLogger
 from .llm import LLMClient
@@ -25,9 +25,15 @@ class PromptManager:
     def __init__(
         self,
         db_path: str = "prompts.db",
+        storage_type: str = "sqlite",
+        mongo_uri: Optional[str] = None,
+        mongo_db_name: str = "llmpivot",
+        tenant_id: str = "default",
         cache_ttl: int = 5,
         protected_mode: bool = False,
         admin_password: Optional[str] = None,
+        auth_mode: str = "disabled",  # "disabled", "protected", "rbac"
+        secret_key: Optional[str] = None,
         log_sample_rate: float = 1.0,
         # LLM suggester (all optional)
         llm_url: Optional[str] = None,
@@ -38,18 +44,33 @@ class PromptManager:
         global _instance
 
         self.db_path = db_path
+        self.tenant_id = tenant_id
         self.cache_ttl = cache_ttl
         self.protected_mode = protected_mode
         self.admin_password = admin_password
+        self.secret_key = secret_key or "llmpivot-secret-key-change-me"
         self.log_sample_rate = log_sample_rate
 
-        # Bootstrap DB synchronously so it's ready before any async calls
-        init_db(db_path)
+        if protected_mode and auth_mode == "disabled":
+            self.auth_mode = "protected"
+        else:
+            self.auth_mode = auth_mode
 
-        self.cache = PromptCache(db_path, cache_ttl)
-        self.usage_logger = PromptLogger(db_path, log_sample_rate)
+        # Initialize storage backend
+        if storage_type == "mongodb" or mongo_uri is not None:
+            self.storage: BaseStorage = MongoStorage(
+                mongo_uri=mongo_uri or "mongodb://localhost:27017",
+                db_name=mongo_db_name,
+            )
+        else:
+            self.storage = SQLiteStorage(db_path)
 
-        # LLM client - only created if url is provided
+        self.storage.init_db_sync()
+
+        self.cache = PromptCache(self.storage, cache_ttl, tenant_id=self.tenant_id)
+        self.usage_logger = PromptLogger(self.storage, log_sample_rate, tenant_id=self.tenant_id)
+
+        # LLM client
         self.llm: Optional[LLMClient] = None
         if llm_url:
             self.llm = LLMClient(
@@ -60,11 +81,34 @@ class PromptManager:
             )
 
         _instance = self
-        logger.info("PromptManager initialized (db=%s, ttl=%ds, protected=%s)", db_path, cache_ttl, protected_mode)
+        logger.info(
+            "PromptManager initialized (storage=%s, tenant=%s, ttl=%ds, auth_mode=%s)",
+            storage_type,
+            tenant_id,
+            cache_ttl,
+            self.auth_mode,
+        )
 
     @property
     def has_llm(self) -> bool:
         return self.llm is not None
+
+    async def _bootstrap_admin(self) -> None:
+        try:
+            admin_user = await self.storage.get_user("admin")
+            if not admin_user:
+                from .auth import hash_password
+                pwd_hash = hash_password("admin")
+                await self.storage.create_user(
+                    username="admin",
+                    password_hash=pwd_hash,
+                    role="admin",
+                    email="admin@llmpivot.local",
+                    tenant_id=self.tenant_id,
+                )
+                logger.info("Default admin user 'admin' created successfully with password 'admin'.")
+        except Exception as exc:
+            logger.debug("Bootstrap admin check skipped: %s", exc)
 
     def mount_ui(self):
         """
@@ -80,8 +124,10 @@ class PromptManager:
         sub.include_router(build_router(self))
 
         @sub.on_event("startup")
-        async def _start_cache():
+        async def _start_bg():
+            await self._bootstrap_admin()
             self.cache.start()
+            self.usage_logger.start()
 
         return sub
 
@@ -95,10 +141,8 @@ class PromptManager:
     async def get_with_meta(self, name: str) -> dict:
         """
         Async - returns both content and version_id.
-        Use this when you need to log usage with the correct version.
-
         Returns:
-            {"content": str, "version_id": int}
+            {"content": str, "version_id": int/str}
         """
         entry = await self.cache.get(name)
         if entry is None:
@@ -106,14 +150,9 @@ class PromptManager:
         return {"content": entry["content"], "version_id": entry["version_id"]}
 
     def get_sync(self, name: str) -> str:
-        """
-        Sync convenience wrapper.
-        Works in plain sync scripts. In async contexts (FastAPI), use aget_prompt() instead.
-        """
+        """Sync convenience wrapper."""
         try:
             loop = asyncio.get_running_loop()
-            # We're inside a running event loop - can't block it.
-            # Return stale cache if available, otherwise raise a clear error.
             entry = self.cache._store.get(name)
             if entry:
                 return entry["content"]
@@ -122,7 +161,6 @@ class PromptManager:
                 "Inside async code, use `await aget_prompt('{name}')` instead of `get_prompt()`."
             )
         except RuntimeError:
-            # No running loop - safe to block
             try:
                 loop = asyncio.get_event_loop()
                 return loop.run_until_complete(self.get(name))
