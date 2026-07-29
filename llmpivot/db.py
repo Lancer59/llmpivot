@@ -1,5 +1,5 @@
 """
-SQLite storage layer — schema creation and all DB queries.
+SQLite storage layer - schema creation and all DB queries.
 Uses aiosqlite for async access and sqlite3 for sync bootstrap.
 """
 
@@ -36,7 +36,7 @@ CREATE TABLE IF NOT EXISTS prompt_logs (
 
 
 def init_db(db_path: str) -> None:
-    """Synchronous bootstrap — creates tables if they don't exist."""
+    """Synchronous bootstrap - creates tables if they don't exist."""
     conn = sqlite3.connect(db_path)
     conn.executescript(DDL)
     conn.commit()

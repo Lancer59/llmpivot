@@ -1,5 +1,5 @@
 """
-PromptManager — central coordinator.
+PromptManager - central coordinator.
 Initialize once at app startup; get_prompt() uses the singleton.
 """
 
@@ -49,7 +49,7 @@ class PromptManager:
         self.cache = PromptCache(db_path, cache_ttl)
         self.usage_logger = PromptLogger(db_path, log_sample_rate)
 
-        # LLM client — only created if url is provided
+        # LLM client - only created if url is provided
         self.llm: Optional[LLMClient] = None
         if llm_url:
             self.llm = LLMClient(
@@ -86,7 +86,7 @@ class PromptManager:
         return sub
 
     async def get(self, name: str) -> str:
-        """Async version — preferred inside async code."""
+        """Async version - preferred inside async code."""
         entry = await self.cache.get(name)
         if entry is None:
             raise PromptNotFoundError(f"No active prompt found for '{name}'")
@@ -94,7 +94,7 @@ class PromptManager:
 
     async def get_with_meta(self, name: str) -> dict:
         """
-        Async — returns both content and version_id.
+        Async - returns both content and version_id.
         Use this when you need to log usage with the correct version.
 
         Returns:
@@ -112,7 +112,7 @@ class PromptManager:
         """
         try:
             loop = asyncio.get_running_loop()
-            # We're inside a running event loop — can't block it.
+            # We're inside a running event loop - can't block it.
             # Return stale cache if available, otherwise raise a clear error.
             entry = self.cache._store.get(name)
             if entry:
@@ -122,7 +122,7 @@ class PromptManager:
                 "Inside async code, use `await aget_prompt('{name}')` instead of `get_prompt()`."
             )
         except RuntimeError:
-            # No running loop — safe to block
+            # No running loop - safe to block
             try:
                 loop = asyncio.get_event_loop()
                 return loop.run_until_complete(self.get(name))

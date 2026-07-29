@@ -18,7 +18,7 @@ class UITemplateTests(unittest.TestCase):
         html = templates.prompt_list([], protected=False, base="")
 
         self.assertIn("Prompt Manager", html)
-        self.assertIn("<title>Prompts — Prompt Manager</title>", html)
+        self.assertIn("<title>Home - Prompt Manager</title>", html)
         self.assertNotIn("llmpivot", html.lower())
         self.assertNotIn("LLM Pivot", html)
         self.assertNotIn(">v1<", html)

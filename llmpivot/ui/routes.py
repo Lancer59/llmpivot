@@ -1,6 +1,6 @@
 """
 FastAPI router for the Prompt Manager UI.
-All routes are relative — mount at any prefix with app.mount().
+All routes are relative - mount at any prefix with app.mount().
 """
 
 import json
@@ -228,7 +228,7 @@ def build_router(manager: "PromptManager") -> APIRouter:
   <p class="text-muted" style="margin-bottom:16px;">
     Upload a JSON file in the format <code>{{"prompt_name": "prompt content", ...}}</code>.
     Each prompt will be imported as a new version and set active.
-    Existing prompts are not overwritten — a new version is created instead.
+    Existing prompts are not overwritten - a new version is created instead.
   </p>
   <form method="post" action="{base}/import" enctype="multipart/form-data">
     <div class="form-group">

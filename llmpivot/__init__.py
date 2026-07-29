@@ -1,5 +1,5 @@
 """
-llmpivot — runtime prompt control for production apps.
+llmpivot - runtime prompt control for production apps.
 
 Quick start:
     from llmpivot import PromptManager, get_prompt
@@ -20,13 +20,13 @@ def get_prompt(name: str) -> str:
 
 
 async def aget_prompt(name: str) -> str:
-    """Async version of get_prompt — preferred inside async code."""
+    """Async version of get_prompt - preferred inside async code."""
     return await get_instance().get(name)
 
 
 async def aget_prompt_with_meta(name: str) -> dict:
     """
-    Async — returns content and version_id together.
+    Async - returns content and version_id together.
     Use this when you need to log usage with the correct version.
 
     Example:

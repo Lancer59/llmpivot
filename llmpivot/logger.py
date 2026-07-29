@@ -1,6 +1,6 @@
 """
 Async, non-blocking prompt usage logger with sampling support.
-Failures are silently swallowed — never propagate to caller.
+Failures are silently swallowed - never propagate to caller.
 """
 
 import asyncio
@@ -53,7 +53,7 @@ class PromptLogger:
                 return
             await insert_log(self._db_path, prompt_id, version_id, input_text, output_text)
         except RuntimeError:
-            # Event loop closed during shutdown — safe to ignore
+            # Event loop closed during shutdown - safe to ignore
             pass
         except Exception as exc:
             logger.debug("Log write failed silently: %s", exc)

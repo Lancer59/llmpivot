@@ -3,7 +3,7 @@
 
 Open-source, local-first, Production grade intelligent prompt management system.
 
-Runtime prompt control for LLM/AI apps. Change a prompt in the UI, see it reflected in your running app within seconds — no redeployment needed.
+Runtime prompt control for LLM/AI apps. Change a prompt in the UI, see it reflected in your running app within seconds - no redeployment needed.
 
 ## Install
 
@@ -35,7 +35,7 @@ async def run(text: str = "hello"):
 
     output = your_llm(meta["content"], text)  # your LLM call
 
-    # 4. Log usage with the correct version — no hardcoding
+    # 4. Log usage with the correct version - no hardcoding
     log_prompt_usage("my_prompt", meta["version_id"], input_text=text, output_text=output)
 
     return {"output": output}
@@ -59,7 +59,7 @@ prompt = await aget_prompt("my_prompt")
 
 ### `aget_prompt_with_meta(name) -> dict`
 
-Returns both the content and the version_id of the active prompt. Preferred when you need to log usage accurately — no hardcoded IDs.
+Returns both the content and the version_id of the active prompt. Preferred when you need to log usage accurately - no hardcoded IDs.
 
 ```python
 from llmpivot import aget_prompt_with_meta
@@ -83,7 +83,7 @@ prompt = get_prompt("my_prompt")
 
 ### `log_prompt_usage(name, version_id, input_text, output_text)`
 
-Writes a usage log entry to the `prompt_logs` table. Async, non-blocking — safe to call from sync or async code. Failures are silently swallowed and never propagate to the caller.
+Writes a usage log entry to the `prompt_logs` table. Async, non-blocking - safe to call from sync or async code. Failures are silently swallowed and never propagate to the caller.
 
 ```python
 from llmpivot import log_prompt_usage
@@ -148,7 +148,7 @@ manager = PromptManager(
 )
 ```
 
-No sessions or tokens — a simple password check per action. Wrong password re-renders the form with an error.
+No sessions or tokens - a simple password check per action. Wrong password re-renders the form with an error.
 
 ---
 
@@ -156,7 +156,7 @@ No sessions or tokens — a simple password check per action. Wrong password re-
 
 Versions can be tagged `prod`, `staging`, or `experiment`.
 
-- Only one `prod` tag is active per prompt at a time — assigning it removes the tag from the previous version automatically.
+- Only one `prod` tag is active per prompt at a time - assigning it removes the tag from the previous version automatically.
 - In protected mode, assigning `prod` or setting a version active requires the admin password.
 
 ---

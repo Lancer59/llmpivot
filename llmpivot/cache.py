@@ -54,7 +54,7 @@ class PromptCache:
                 }
         except Exception as exc:
             logger.warning("Cache refresh failed for '%s': %s", name, exc)
-            # Keep stale value — do not evict
+            # Keep stale value - do not evict
 
     def invalidate(self, name: str) -> None:
         """Force next get() to re-fetch from DB."""

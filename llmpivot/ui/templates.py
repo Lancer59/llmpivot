@@ -1,5 +1,5 @@
 """
-Server-rendered HTML templates — pure Python strings, no template engine needed.
+Server-rendered HTML templates - pure Python strings, no template engine needed.
 All link/form helpers take a `base` prefix (e.g. '/prompts') so paths are always absolute.
 """
 
@@ -20,7 +20,7 @@ def _layout(title: str, body: str, protected: bool = False, base: str = "") -> s
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>{title} — {APP_NAME}</title>
+<title>{title} - {APP_NAME}</title>
 <style>
   *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
   :root {{
@@ -160,8 +160,8 @@ def prompt_list(prompts: list[dict], protected: bool, base: str) -> str:
     for p in prompts:
         rows += f"""<tr>
           <td><a href="{base}/detail/{p['name']}">{p['name']}</a></td>
-          <td class="mono">v{p['active_version'] or '—'}</td>
-          <td class="text-muted">{p['last_edited_by'] or '—'}</td>
+          <td class="mono">v{p['active_version'] or '-'}</td>
+          <td class="text-muted">{p['last_edited_by'] or '-'}</td>
           <td class="text-muted">{(p['last_updated'] or '')[:16]}</td>
           <td><a href="{base}/edit/{p['name']}" class="btn btn-ghost btn-sm">Edit</a></td>
         </tr>"""
@@ -199,9 +199,9 @@ def prompt_detail(name: str, versions: list[dict], protected: bool, base: str) -
         tag_html = _tag_badge(active.get("tag"))
         active_block = f"""
 <div class="card">
-  <h2>Active Version — v{active['version_number']} {tag_html}</h2>
+  <h2>Active Version - v{active['version_number']} {tag_html}</h2>
   <pre class="mono" style="white-space:pre-wrap;color:#e2e8f0;">{_esc(active['content'])}</pre>
-  <p class="text-muted mt-8">by {_esc(active['created_by'] or '—')} · {str(active['created_at'])[:16]}</p>
+  <p class="text-muted mt-8">by {_esc(active['created_by'] or '-')} · {str(active['created_at'])[:16]}</p>
 </div>"""
 
     version_rows = ""
@@ -217,7 +217,7 @@ def prompt_detail(name: str, versions: list[dict], protected: bool, base: str) -
         version_rows += f"""<tr>
           <td class="mono">v{v['version_number']}</td>
           <td>{active_badge} {tag_html}</td>
-          <td class="text-muted">{_esc(v['created_by'] or '—')}</td>
+          <td class="text-muted">{_esc(v['created_by'] or '-')}</td>
           <td class="text-muted">{str(v['created_at'])[:16]}</td>
           <td>
             <div class="flex">
@@ -260,7 +260,7 @@ def edit_page(
     error: str = "",
     is_new: bool = False,
 ) -> str:
-    title = "New Prompt" if is_new else f"Edit — {name}"
+    title = "New Prompt" if is_new else f"Edit - {name}"
     form_action = f"{base}/edit/__new__" if is_new else f"{base}/edit/{name}"
     back_href = f"{base}/list" if is_new else f"{base}/detail/{name}"
 
@@ -340,7 +340,7 @@ function dismissSuggestion() {{
   <div class="form-group">
     <label for="tag">Tag (optional)</label>
     <select id="tag" name="tag">
-      <option value="">— none —</option>
+      <option value="">- none -</option>
       <option value="prod">prod</option>
       <option value="staging">staging</option>
       <option value="experiment">experiment</option>
@@ -376,7 +376,7 @@ def diff_page(name: str, versions: list[dict], v1: Optional[dict], v2: Optional[
         diff_html = _render_diff(v1["content"], v2["content"])
 
     body = f"""
-<h1>Diff — {_esc(name)}</h1>
+<h1>Diff - {_esc(name)}</h1>
 <div class="card">
   <form method="get" action="{base}/diff/{name}" class="flex">
     <div style="flex:1">
@@ -392,7 +392,7 @@ def diff_page(name: str, versions: list[dict], v1: Optional[dict], v2: Optional[
 </div>
 {diff_html}
 <div class="mt-16"><a href="{base}/detail/{name}" class="btn btn-ghost">← Back</a></div>"""
-    return _layout(f"Diff — {name}", body, protected, base)
+    return _layout(f"Diff - {name}", body, protected, base)
 
 
 def _render_diff(a: str, b: str) -> str:
@@ -420,10 +420,10 @@ def _render_diff(a: str, b: str) -> str:
 
 def ab_test_page(name: str, versions: list[dict], protected: bool, has_llm: bool, base: str) -> str:
     if not has_llm:
-        body = f"""<h1>A/B Test — {_esc(name)}</h1>
+        body = f"""<h1>A/B Test - {_esc(name)}</h1>
 <div class="card"><p class="text-muted">LLM not configured. Add <code>llm_url</code> to PromptManager to enable this feature.</p></div>
 <a href="{base}/detail/{name}" class="btn btn-ghost">← Back</a>"""
-        return _layout(f"A/B Test — {name}", body, protected, base)
+        return _layout(f"A/B Test - {name}", body, protected, base)
 
     options = "".join(
         f'<option value="{v["id"]}">v{v["version_number"]} {v.get("tag") or ""}</option>'
@@ -431,7 +431,7 @@ def ab_test_page(name: str, versions: list[dict], protected: bool, has_llm: bool
     )
 
     body = f"""
-<h1>A/B Test — {_esc(name)}</h1>
+<h1>A/B Test - {_esc(name)}</h1>
 <div class="card">
   <div class="form-group">
     <label>Test Input</label>
@@ -479,7 +479,7 @@ async function runAB() {{
   document.getElementById('out_b').textContent = rb.output || rb.detail || 'Error';
 }}
 </script>"""
-    return _layout(f"A/B Test — {name}", body, protected, base)
+    return _layout(f"A/B Test - {name}", body, protected, base)
 
 
 # ---------------------------------------------------------------------------
@@ -522,8 +522,8 @@ def logs_page(logs: list[dict], protected: bool, base: str, prompt_filter: str =
           <td class="text-muted">{str(log['timestamp'])[:19]}</td>
           <td><a href="{base}/detail/{log['prompt_name']}">{_esc(log['prompt_name'])}</a></td>
           <td class="mono" style="color:#a0aec0;">v{log['version_number']}</td>
-          <td class="mono" style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{_esc(log['input'] or '—')}</td>
-          <td class="mono" style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{_esc(log['output'] or '—')}</td>
+          <td class="mono" style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{_esc(log['input'] or '-')}</td>
+          <td class="mono" style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{_esc(log['output'] or '-')}</td>
         </tr>"""
 
     if not rows:
