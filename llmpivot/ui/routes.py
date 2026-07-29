@@ -408,4 +408,44 @@ def build_router(manager: "PromptManager") -> APIRouter:
 <div class="flex mt-16"><a href="{base}/list" class="btn btn-primary">View All Prompts</a></div>"""
         return HTMLResponse(_layout("Import Complete", body, manager.protected_mode, base, user=user))
 
+    # ------------------------------------------------------------------
+    # API: LLM suggest
+    # ------------------------------------------------------------------
+
+    @router.post("/api/suggest")
+    async def suggest(request: Request):
+        if not manager.has_llm:
+            return JSONResponse({"detail": "LLM not configured."}, status_code=403)
+        body = await request.json()
+        content = body.get("content", "").strip()
+        if not content:
+            return JSONResponse({"detail": "content is required."}, status_code=400)
+        try:
+            suggestion = await manager.llm.suggest(content)
+            return JSONResponse({"suggestion": suggestion})
+        except Exception as exc:
+            return JSONResponse({"detail": f"LLM error: {exc}"}, status_code=502)
+
+    # ------------------------------------------------------------------
+    # API: A/B run
+    # ------------------------------------------------------------------
+
+    @router.post("/api/run")
+    async def ab_run(request: Request):
+        if not manager.has_llm:
+            return JSONResponse({"detail": "LLM not configured."}, status_code=403)
+        body = await request.json()
+        version_id = body.get("version_id")
+        input_text = body.get("input", "").strip()
+        if not version_id:
+            return JSONResponse({"detail": "version_id is required."}, status_code=400)
+        version = await manager.storage.fetch_version_by_id(version_id, tenant_id=manager.tenant_id)
+        if not version:
+            return JSONResponse({"detail": "Version not found."}, status_code=404)
+        try:
+            output = await manager.llm.run(version["content"], input_text)
+            return JSONResponse({"output": output})
+        except Exception as exc:
+            return JSONResponse({"detail": f"LLM error: {exc}"}, status_code=502)
+
     return router

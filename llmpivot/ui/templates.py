@@ -118,8 +118,7 @@ def _layout(title: str, body: str, protected: bool = False, base: str = "", user
   .error {{ background: var(--danger-bg); color: var(--danger-text); border: 1px solid #9b2c2c; padding: 10px 14px; border-radius: 7px; margin-bottom: 16px; font-size: 0.88rem; }}
   .success {{ background: #276749; color: #9ae6b4; border: 1px solid #2f855a; padding: 10px 14px; border-radius: 7px; margin-bottom: 16px; font-size: 0.88rem; }}
   .text-muted {{ color: var(--muted); }}
-  textarea, input[type="text"], input[type="password"], input[type="email"], select {{ background: #11141f; border: 1px solid var(--line); color: var(--text); border-radius: 7px; padding: 99px 12px; font-size: 0.9rem; width: 100%; }}
-  textarea, input[type="text"], input[type="password"], input[type="email"], select {{ padding: 9px 12px; }}
+  textarea, input[type="text"], input[type="password"], input[type="email"], select {{ background: #11141f; border: 1px solid var(--line); color: var(--text); border-radius: 7px; padding: 9px 12px; font-size: 0.9rem; width: 100%; }}
   textarea:focus, input:focus, select:focus {{ outline: none; border-color: var(--accent); }}
   label {{ display: block; font-size: 0.82rem; font-weight: 650; color: var(--muted-strong); margin-bottom: 6px; }}
   .form-group {{ margin-bottom: 16px; }}
@@ -285,13 +284,43 @@ def edit_page(
       <input type="password" id="password" name="password" placeholder="Enter admin password">
     </div>""" if protected else ""
 
+    llm_btn = f"""
+    <button type="button" id="suggest-btn" class="btn btn-ghost btn-sm" style="color:var(--accent);">✨ Get AI Suggestion</button>
+    """ if has_llm else ""
+
+    script_tag = f"""
+    <script>
+    document.getElementById('suggest-btn')?.addEventListener('click', async () => {{
+      const contentEl = document.getElementById('content');
+      const btn = document.getElementById('suggest-btn');
+      if (!contentEl.value.trim()) {{ alert('Please enter prompt content first.'); return; }}
+      btn.innerText = '✨ Suggesting...';
+      btn.disabled = true;
+      try {{
+        const res = await fetch('{base}/api/suggest', {{
+          method: 'POST',
+          headers: {{ 'Content-Type': 'application/json' }},
+          body: JSON.stringify({{ content: contentEl.value }})
+        }});
+        const data = await res.json();
+        if (data.suggestion) {{ contentEl.value = data.suggestion; }}
+        else {{ alert(data.detail || 'Error getting suggestion'); }}
+      }} catch (err) {{ alert('Error: ' + err); }}
+      finally {{ btn.innerText = '✨ Get AI Suggestion'; btn.disabled = false; }}
+    }});
+    </script>
+    """ if has_llm else ""
+
     body = f"""
 <h1>{title_text}</h1>
 {err_div}
 <form method="post" action="{action}">
   {name_input}
   <div class="form-group">
-    <label for="content">Prompt Content</label>
+    <div class="flex-between" style="margin-bottom:6px;">
+      <label for="content" style="margin:0;">Prompt Content</label>
+      {llm_btn}
+    </div>
     <textarea id="content" name="content" rows="12">{content}</textarea>
   </div>
 
@@ -324,7 +353,8 @@ def edit_page(
     <button type="submit" class="btn btn-primary">Save New Version</button>
     <a href="{base}/list" class="btn btn-ghost">Cancel</a>
   </div>
-</form>"""
+</form>
+{script_tag}"""
     return _layout(title_text, body, protected, base, user)
 
 
@@ -357,11 +387,74 @@ def diff_page(name: str, versions: list, v1: Optional[dict], v2: Optional[dict],
 
 
 def ab_test_page(name: str, versions: list, protected: bool, has_llm: bool, base: str, user: Optional[dict] = None) -> str:
+    v_opts = "".join(f'<option value="{v["id"]}">v{v["version_number"]} ({v.get("tag") or "no tag"})</option>' for v in versions)
+
+    llm_notice = "" if has_llm else '<div class="error" style="margin-bottom:16px;">LLM provider is not configured. Configure <code>llm_url</code> in PromptManager to enable live A/B test runs.</div>'
+
     body = f"""
 <h1>A/B Test Prompt: <span style="color:var(--accent);">{name}</span></h1>
-<div class="card">
-  <p class="text-muted">Compare execution outputs of prompt versions.</p>
-</div>"""
+{llm_notice}
+<div class="card" style="margin-bottom:20px;">
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px;">
+    <div>
+      <label for="v1-select">Version A</label>
+      <select id="v1-select">{v_opts}</select>
+    </div>
+    <div>
+      <label for="v2-select">Version B</label>
+      <select id="v2-select">{v_opts}</select>
+    </div>
+  </div>
+  <div class="form-group">
+    <label for="test-input">Test Input Text</label>
+    <textarea id="test-input" rows="3" placeholder="Enter test input variable or prompt context..."></textarea>
+  </div>
+  <button id="run-ab-btn" class="btn btn-primary" {'disabled' if not has_llm else ''}>⚡ Run A/B Comparison</button>
+</div>
+
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">
+  <div class="card">
+    <h2>Version A Output</h2>
+    <pre id="out-a" style="font-family:monospace;font-size:0.85rem;color:var(--muted-strong);min-height:120px;white-space:pre-wrap;">(Select Version A and click Run)</pre>
+  </div>
+  <div class="card">
+    <h2>Version B Output</h2>
+    <pre id="out-b" style="font-family:monospace;font-size:0.85rem;color:var(--muted-strong);min-height:120px;white-space:pre-wrap;">(Select Version B and click Run)</pre>
+  </div>
+</div>
+
+<script>
+document.getElementById('run-ab-btn')?.addEventListener('click', async () => {{
+  const v1 = document.getElementById('v1-select').value;
+  const v2 = document.getElementById('v2-select').value;
+  const input = document.getElementById('test-input').value;
+  const outA = document.getElementById('out-a');
+  const outB = document.getElementById('out-b');
+
+  outA.innerText = 'Running Version A...';
+  outB.innerText = 'Running Version B...';
+
+  const runOne = async (vId) => {{
+    const res = await fetch('{base}/api/run', {{
+      method: 'POST',
+      headers: {{ 'Content-Type': 'application/json' }},
+      body: JSON.stringify({{ version_id: vId, input: input }})
+    }});
+    const data = await res.json();
+    return data.output || data.detail || 'Error running prompt';
+  }};
+
+  try {{
+    const [resA, resB] = await Promise.all([runOne(v1), runOne(v2)]);
+    outA.innerText = resA;
+    outB.innerText = resB;
+  }} catch (err) {{
+    outA.innerText = 'Error: ' + err;
+    outB.innerText = 'Error: ' + err;
+  }}
+}});
+</script>
+"""
     return _layout("A/B Test", body, protected, base, user)
 
 
