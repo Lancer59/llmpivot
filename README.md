@@ -1,4 +1,4 @@
-# LLMPivot ⚡
+# LLMPivot
 ## Production-Grade Runtime Prompt Control, Versioning & Multi-Tenant Platform
 
 Open-source, high-concurrency prompt management system for production LLM & AI applications.  
@@ -8,12 +8,12 @@ Change a prompt in the web UI and see it reflected in your running app instantly
 
 ## Key Features
 
-- ⚡ **Runtime Control**: Dynamic prompt iteration with instant in-memory caching.
-- 👥 **Multi-User Concurrency & Multi-Tenancy**: Built for high-traffic apps with SQLite WAL mode, async queue batch logging, and workspace isolation (`tenant_id`).
-- 🔐 **Authentication & RBAC**: Default admin bootstrap (`admin / admin`), session JWT cookies, PBKDF2 password security, and Role-Based Access Control (`admin`, `editor`, `viewer`).
-- 🗄️ **Pluggable Storage Engines**: Support for file-based **SQLite** out-of-the-box and **MongoDB** NoSQL database backends.
-- ✨ **AI Prompt Suggestions & A/B Testing**: Integrated OpenAI-compatible AI prompt improver and side-by-side version comparison.
-- 🛡️ **Fail-Safe Resilience**: Stale-cache serving if the database goes down — your application never crashes.
+- **Runtime Control**: Dynamic prompt iteration with instant in-memory caching.
+- **Multi-User Concurrency & Multi-Tenancy**: Built for high-traffic apps with SQLite WAL mode, async queue batch logging, and workspace isolation (`tenant_id`).
+- **Authentication & RBAC**: Default admin bootstrap (`admin / admin`), session JWT cookies, PBKDF2 password security, and Role-Based Access Control (`admin`, `editor`, `viewer`).
+- **Pluggable Storage Engines**: Support for file-based **SQLite** out-of-the-box and **MongoDB** NoSQL database backends.
+- **AI Prompt Suggestions & A/B Testing**: Integrated OpenAI-compatible AI prompt improver and side-by-side version comparison.
+- **Fail-Safe Resilience**: Stale-cache serving if the database goes down — your application never crashes.
 
 ---
 
