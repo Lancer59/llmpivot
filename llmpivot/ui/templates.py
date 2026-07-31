@@ -4,31 +4,28 @@ All link/form helpers take a `base` prefix (e.g. '/prompts') so paths are always
 """
 
 import difflib
-import html
 from typing import Optional, List, Dict, Any
 
+try:
+    from .helpers import escape as _escape, render_user_badge
+except ImportError:  # pragma: no cover - supports direct module loading in tests
+    import importlib.util
+    from pathlib import Path
+
+    helper_path = Path(__file__).resolve().with_name("helpers.py")
+    spec = importlib.util.spec_from_file_location("llmpivot.ui.helpers", helper_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    _escape = module.escape
+    render_user_badge = module.render_user_badge
+
 APP_NAME = "Prompt Manager"
-
-
-def _escape(value: Any) -> str:
-    return html.escape(str(value), quote=True)
 
 
 def _layout(title: str, body: str, protected: bool = False, base: str = "", user: Optional[dict] = None) -> str:
     badge = '<span class="nav-badge">PROTECTED</span>' if protected else ""
     
-    user_nav = ""
-    if user:
-        username = _escape(user.get("username", "user"))
-        role = _escape(user.get("role", "editor"))
-        admin_link = f'<a href="{base}/users" class="nav-link" style="color:var(--accent);font-weight:700;">Users</a>' if role.lower() == 'admin' else ''
-        user_nav = f"""
-        <div style="display:flex;align-items:center;gap:8px;margin-left:12px;padding-left:12px;border-left:1px solid var(--line);">
-          <span style="font-size:0.82rem;color:#e2e8f0;font-weight:600;">👤 {username}</span>
-          <span class="badge badge-active" style="font-size:0.68rem;">{role.upper()}</span>
-          {admin_link}
-          <a href="{base}/logout" class="nav-link" style="font-size:0.82rem;color:#feb2b2;">Logout</a>
-        </div>"""
+    user_nav = render_user_badge(user, base) if user else ""
 
     return f"""<!DOCTYPE html>
 <html lang="en">

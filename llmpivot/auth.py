@@ -68,7 +68,15 @@ def get_current_user_from_request(request: Request, secret_key: str) -> Optional
             token = auth_header[7:].strip()
     if not token:
         return None
-    return verify_token(token, secret_key)
+
+    user = verify_token(token, secret_key)
+    if user is None:
+        return None
+
+    if not isinstance(user, dict):
+        return None
+
+    return user
 
 
 def has_permission(user_role: str, min_required_role: str) -> bool:

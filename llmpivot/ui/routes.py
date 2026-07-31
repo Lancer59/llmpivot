@@ -81,13 +81,20 @@ def build_router(manager: "PromptManager") -> APIRouter:
             manager.secret_key,
         )
         resp = RedirectResponse(f"{base}/list", status_code=303)
-        resp.set_cookie("llmpivot_session", token, httponly=True, samesite="lax")
+        resp.set_cookie(
+            "llmpivot_session",
+            token,
+            httponly=True,
+            samesite="lax",
+            secure=False,
+            max_age=86400,
+        )
         return resp
 
     @router.get("/logout")
     async def logout(request: Request):
         resp = RedirectResponse(f"{_base(request)}/login", status_code=303)
-        resp.delete_cookie("llmpivot_session")
+        resp.delete_cookie("llmpivot_session", path="/", samesite="lax")
         return resp
 
     # ------------------------------------------------------------------

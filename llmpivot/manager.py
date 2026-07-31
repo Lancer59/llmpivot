@@ -5,6 +5,7 @@ Initialize once at app startup; get_prompt() uses the singleton.
 
 import asyncio
 import logging
+from contextlib import asynccontextmanager
 from typing import Optional
 
 from .storage import BaseStorage, SQLiteStorage, MongoStorage
@@ -128,14 +129,19 @@ class PromptManager:
         from fastapi import FastAPI
         from .ui.routes import build_router
 
-        sub = FastAPI()
-        sub.include_router(build_router(self))
-
-        @sub.on_event("startup")
-        async def _start_bg():
+        @asynccontextmanager
+        async def lifespan(_app):
             await self._bootstrap_admin()
             self.cache.start()
             self.usage_logger.start()
+            yield
+
+        sub = FastAPI(lifespan=lifespan)
+        sub.include_router(build_router(self))
+
+        @sub.get("/healthz")
+        async def _healthz():
+            return {"status": "ok"}
 
         return sub
 

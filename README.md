@@ -156,7 +156,7 @@ manager = PromptManager(db_path="prompts.db")
 print(await manager.storage.migrate_missing_tenant_ids(tenant_id="default"))
 ```
 
-This assigns a default tenant to legacy rows so they remain accessible after the upgrade. For production deployments, replace `"default"` with your intended tenant name.
+This assigns a default tenant to legacy rows so they remain accessible after the upgrade. For production deployments, replace `"default"` with the tenant name you want those existing records to belong to.
 
 ---
 
