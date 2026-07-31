@@ -4,9 +4,14 @@ All link/form helpers take a `base` prefix (e.g. '/prompts') so paths are always
 """
 
 import difflib
+import html
 from typing import Optional, List, Dict, Any
 
 APP_NAME = "Prompt Manager"
+
+
+def _escape(value: Any) -> str:
+    return html.escape(str(value), quote=True)
 
 
 def _layout(title: str, body: str, protected: bool = False, base: str = "", user: Optional[dict] = None) -> str:
@@ -14,9 +19,9 @@ def _layout(title: str, body: str, protected: bool = False, base: str = "", user
     
     user_nav = ""
     if user:
-        username = user.get("username", "user")
-        role = user.get("role", "editor")
-        admin_link = f'<a href="{base}/users" class="nav-link" style="color:var(--accent);font-weight:700;">Users</a>' if role == 'admin' else ''
+        username = _escape(user.get("username", "user"))
+        role = _escape(user.get("role", "editor"))
+        admin_link = f'<a href="{base}/users" class="nav-link" style="color:var(--accent);font-weight:700;">Users</a>' if role.lower() == 'admin' else ''
         user_nav = f"""
         <div style="display:flex;align-items:center;gap:8px;margin-left:12px;padding-left:12px;border-left:1px solid var(--line);">
           <span style="font-size:0.82rem;color:#e2e8f0;font-weight:600;">👤 {username}</span>
@@ -153,13 +158,13 @@ def prompt_list(prompts: list, protected: bool = False, base: str = "", user: Op
         v_str = f"v{v}" if v else "<span class='text-muted'>none</span>"
         editor = p.get("last_edited_by") or "-"
         updated = p.get("last_updated") or "-"
-        name = p["name"]
+        name = _escape(p["name"])
         rows += f"""
         <tr>
           <td><a href="{base}/detail/{name}" style="font-weight:600;">{name}</a></td>
           <td>{v_str}</td>
-          <td>{editor}</td>
-          <td class="text-muted" style="font-size:0.82rem;">{updated}</td>
+          <td>{_escape(editor)}</td>
+          <td class="text-muted" style="font-size:0.82rem;">{_escape(updated)}</td>
           <td style="text-align:right;">
             <a href="{base}/edit/{name}" class="btn btn-ghost btn-sm">Edit</a>
           </td>
@@ -220,12 +225,15 @@ def prompt_detail(name: str, versions: list, protected: bool = False, base: str 
                   <button type="submit" class="btn btn-ghost btn-sm">Make Active</button>
                 </form>"""
 
+        created_by = _escape(v.get("created_by") or "-")
+        created_at = _escape(v.get("created_at") or "-")
+        content_preview = _escape((v.get("content", "") or "")[:120])
         v_rows += f"""
         <tr>
           <td><strong>v{v_num}</strong> {act_badge} {tag_badge}</td>
-          <td>{v.get("created_by") or "-"}</td>
-          <td class="text-muted" style="font-size:0.82rem;">{v.get("created_at") or "-"}</td>
-          <td><pre style="max-height:60px;overflow:hidden;font-size:0.8rem;color:var(--muted-strong);">{v.get("content", "")[:120]}</pre></td>
+          <td>{created_by}</td>
+          <td class="text-muted" style="font-size:0.82rem;">{created_at}</td>
+          <td><pre style="max-height:60px;overflow:hidden;font-size:0.8rem;color:var(--muted-strong);">{content_preview}</pre></td>
           <td style="text-align:right;">{act_btn}</td>
         </tr>"""
 
@@ -312,7 +320,7 @@ def edit_page(
     """ if has_llm else ""
 
     body = f"""
-<h1>{title_text}</h1>
+<h1>{_escape(title_text)}</h1>
 {err_div}
 <form method="post" action="{action}">
   {name_input}
@@ -370,7 +378,7 @@ def diff_page(name: str, versions: list, v1: Optional[dict], v2: Optional[dict],
     opts = "".join(f'<option value="{v["id"]}">v{v["version_number"]} ({v.get("created_at") or ""})</option>' for v in versions)
 
     body = f"""
-<h1>Diff Versions: <span style="color:var(--accent);">{name}</span></h1>
+<h1>Diff Versions: <span style="color:var(--accent);">{_escape(name)}</span></h1>
 <form method="get" action="{base}/diff/{name}" class="card flex" style="margin-bottom:20px;">
   <div>
     <label>Version A</label>
@@ -392,7 +400,7 @@ def ab_test_page(name: str, versions: list, protected: bool, has_llm: bool, base
     llm_notice = "" if has_llm else '<div class="error" style="margin-bottom:16px;">LLM provider is not configured. Configure <code>llm_url</code> in PromptManager to enable live A/B test runs.</div>'
 
     body = f"""
-<h1>A/B Test Prompt: <span style="color:var(--accent);">{name}</span></h1>
+<h1>A/B Test Prompt: <span style="color:var(--accent);">{_escape(name)}</span></h1>
 {llm_notice}
 <div class="card" style="margin-bottom:20px;">
   <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px;">
@@ -463,10 +471,10 @@ def logs_page(logs: list, protected: bool, base: str, prompt_filter: str = "", u
     for l in logs:
         log_rows += f"""
         <tr>
-          <td><strong>{l.get("prompt_name")}</strong> (v{l.get("version_number", "-")})</td>
-          <td><pre style="max-height:50px;overflow:hidden;font-size:0.78rem;">{l.get("input", "")[:100]}</pre></td>
-          <td><pre style="max-height:50px;overflow:hidden;font-size:0.78rem;">{l.get("output", "")[:100]}</pre></td>
-          <td class="text-muted" style="font-size:0.8rem;">{l.get("timestamp")}</td>
+          <td><strong>{_escape(l.get("prompt_name"))}</strong> (v{_escape(l.get("version_number", "-"))})</td>
+          <td><pre style="max-height:50px;overflow:hidden;font-size:0.78rem;">{_escape((l.get("input", "") or "")[:100])}</pre></td>
+          <td><pre style="max-height:50px;overflow:hidden;font-size:0.78rem;">{_escape((l.get("output", "") or "")[:100])}</pre></td>
+          <td class="text-muted" style="font-size:0.8rem;">{_escape(l.get("timestamp"))}</td>
         </tr>"""
 
     if not log_rows:
@@ -522,10 +530,10 @@ def users_page(users: list, current_user: Optional[dict] = None, base: str = "",
     for u in users:
         u_rows += f"""
         <tr>
-          <td><strong>{u.get("username")}</strong></td>
-          <td>{u.get("email") or "-"}</td>
-          <td><span class="badge badge-active">{u.get("role", "editor").upper()}</span></td>
-          <td class="text-muted" style="font-size:0.8rem;">{u.get("created_at") or "-"}</td>
+          <td><strong>{_escape(u.get("username"))}</strong></td>
+          <td>{_escape(u.get("email") or "-")}</td>
+          <td><span class="badge badge-active">{_escape(u.get("role", "editor")).upper()}</span></td>
+          <td class="text-muted" style="font-size:0.8rem;">{_escape(u.get("created_at") or "-")}</td>
         </tr>"""
 
     body = f"""
