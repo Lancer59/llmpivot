@@ -72,7 +72,7 @@ def build_router(manager: "PromptManager") -> APIRouter:
         password: str = Form(...),
     ):
         base = _base(request)
-        user = await manager.storage.get_user(username)
+        user = await manager.storage.get_user(username, tenant_id=manager.tenant_id)
         if not user or not verify_password(password, user.get("password_hash", "")):
             return HTMLResponse(login_page(base, error="Invalid username or password."), status_code=400)
 
@@ -118,7 +118,7 @@ def build_router(manager: "PromptManager") -> APIRouter:
 
         base = _base(request)
         user = _get_user(request)
-        existing = await manager.storage.get_user(username)
+        existing = await manager.storage.get_user(username, tenant_id=manager.tenant_id)
         if existing:
             users = await manager.storage.fetch_users(tenant_id=manager.tenant_id)
             return HTMLResponse(users_page(users, user, base, error=f"Username '{username}' already exists."), status_code=400)

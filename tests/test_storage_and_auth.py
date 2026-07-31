@@ -1,5 +1,6 @@
 import asyncio
 import os
+import sqlite3
 import tempfile
 import unittest
 
@@ -83,9 +84,82 @@ class StorageAndAuthTests(unittest.TestCase):
             user = await self.storage.create_user("admin_user", pwd_hash, role="admin", tenant_id="tenant_a")
             self.assertEqual(user["username"], "admin_user")
 
-            fetched_user = await self.storage.get_user("admin_user")
+            fetched_user = await self.storage.get_user("admin_user", tenant_id="tenant_a")
             self.assertIsNotNone(fetched_user)
             self.assertEqual(fetched_user["role"], "admin")
+
+        asyncio.run(run_test())
+
+    def test_tenant_scoping_is_enforced(self):
+        async def run_test():
+            await self.storage.create_version(
+                name="shared_prompt",
+                content="tenant-a content",
+                created_by="alice",
+                tag="prod",
+                set_active=True,
+                tenant_id="tenant_a",
+            )
+            await self.storage.create_version(
+                name="shared_prompt",
+                content="tenant-b content",
+                created_by="bob",
+                tag=None,
+                set_active=True,
+                tenant_id="tenant_b",
+            )
+
+            tenant_a_prompts = await self.storage.fetch_all_prompts(tenant_id="tenant_a")
+            self.assertEqual(len(tenant_a_prompts), 1)
+            self.assertEqual(tenant_a_prompts[0]["name"], "shared_prompt")
+
+            tenant_b_prompts = await self.storage.fetch_all_prompts(tenant_id="tenant_b")
+            self.assertEqual(len(tenant_b_prompts), 1)
+            self.assertEqual(tenant_b_prompts[0]["name"], "shared_prompt")
+
+            active_a = await self.storage.fetch_active_version("shared_prompt", tenant_id="tenant_a")
+            self.assertEqual(active_a["content"], "tenant-a content")
+            active_b = await self.storage.fetch_active_version("shared_prompt", tenant_id="tenant_b")
+            self.assertEqual(active_b["content"], "tenant-b content")
+
+            version_a = active_a["id"]
+            self.assertFalse(await self.storage.set_active_version(version_a, tenant_id="tenant_b"))
+            self.assertTrue(await self.storage.set_active_version(version_a, tenant_id="tenant_a"))
+
+            user = await self.storage.create_user("tenant_user", hash_password("pass123"), tenant_id="tenant_a")
+            fetched_user = await self.storage.get_user(user["username"], tenant_id="tenant_a")
+            self.assertIsNotNone(fetched_user)
+            self.assertEqual(fetched_user["tenant_id"], "tenant_a")
+
+        asyncio.run(run_test())
+
+    def test_migrate_missing_tenant_ids(self):
+        async def run_test():
+            conn = sqlite3.connect(self.db_path)
+            try:
+                cur = conn.cursor()
+                cur.execute("INSERT INTO prompts (name, tenant_id) VALUES (?, ?)", ("legacy_prompt", None))
+                prompt_id = cur.lastrowid
+                cur.execute(
+                    "INSERT INTO prompt_versions (prompt_id, tenant_id, content, version_number, created_by, tag, is_active) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (prompt_id, None, "legacy content", 1, "alice", None, 1),
+                )
+                cur.execute(
+                    "INSERT INTO users (username, password_hash, role, tenant_id) VALUES (?, ?, ?, ?)",
+                    ("legacy_user", "hash", "editor", None),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+            result = await self.storage.migrate_missing_tenant_ids(tenant_id="default")
+            self.assertEqual(result["prompts"], 1)
+            self.assertEqual(result["prompt_versions"], 1)
+            self.assertEqual(result["users"], 1)
+
+            migrated_user = await self.storage.get_user("legacy_user", tenant_id="default")
+            self.assertIsNotNone(migrated_user)
+            self.assertEqual(migrated_user["tenant_id"], "default")
 
         asyncio.run(run_test())
 

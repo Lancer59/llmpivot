@@ -102,7 +102,7 @@ class PromptManager:
             if not self.bootstrap_admin:
                 return
 
-            admin_user = await self.storage.get_user("admin")
+            admin_user = await self.storage.get_user("admin", tenant_id=self.tenant_id)
             if not admin_user:
                 from .auth import hash_password
                 password = self.bootstrap_password or "admin"

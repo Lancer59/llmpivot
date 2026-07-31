@@ -144,6 +144,20 @@ If you do not enable `bootstrap_admin`, no default admin account is created.
 | ✍️ `Editor` | Create prompt versions, edit content, test prompts, set active versions, import prompts. |
 | 👁️ `Viewer` | Read-only access to prompts, version history, diffs, export JSON, and usage logs. |
 
+### Upgrade note for existing installations
+If you are upgrading from an older version and your database already contains rows with missing or empty `tenant_id` values, the stricter tenant isolation rules may hide those rows until they are assigned a tenant.
+
+To avoid surprises, run the migration helper once after upgrading:
+
+```python
+from llmpivot import PromptManager
+
+manager = PromptManager(db_path="prompts.db")
+print(await manager.storage.migrate_missing_tenant_ids(tenant_id="default"))
+```
+
+This assigns a default tenant to legacy rows so they remain accessible after the upgrade. For production deployments, replace `"default"` with your intended tenant name.
+
 ---
 
 ## API Reference

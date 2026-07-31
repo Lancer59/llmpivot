@@ -185,10 +185,10 @@ class SQLiteStorage(BaseStorage):
                     SELECT pv.id, pv.content, pv.version_number, pv.tag, pv.created_by, pv.created_at
                     FROM prompt_versions pv
                     JOIN prompts p ON p.id = pv.prompt_id
-                    WHERE p.name = ? AND (p.tenant_id = ? OR p.tenant_id IS NULL) AND pv.is_active = 1
+                    WHERE p.name = ? AND p.tenant_id = ? AND pv.tenant_id = ? AND pv.is_active = 1
                     LIMIT 1
                     """,
-                    (name, tenant_id),
+                    (name, tenant_id, tenant_id),
                 ) as cur:
                     row = await cur.fetchone()
                     return dict(row) if row else None
@@ -200,10 +200,10 @@ class SQLiteStorage(BaseStorage):
                     SELECT pv.id, pv.content, pv.version_number, pv.tag, pv.created_by, pv.created_at
                     FROM prompt_versions pv
                     JOIN prompts p ON p.id = pv.prompt_id
-                    WHERE p.name = ? AND (p.tenant_id = ? OR p.tenant_id IS NULL) AND pv.is_active = 1
+                    WHERE p.name = ? AND p.tenant_id = ? AND pv.tenant_id = ? AND pv.is_active = 1
                     LIMIT 1
                     """,
-                    (name, tenant_id),
+                    (name, tenant_id, tenant_id),
                 )
                 row = cur.fetchone()
                 return dict(row) if row else None
@@ -220,11 +220,11 @@ class SQLiteStorage(BaseStorage):
                        pv.created_at     AS last_updated
                 FROM prompts p
                 LEFT JOIN prompt_versions pv
-                    ON pv.prompt_id = p.id AND pv.is_active = 1
-                WHERE p.tenant_id = ? OR p.tenant_id IS NULL
+                    ON pv.prompt_id = p.id AND pv.is_active = 1 AND pv.tenant_id = ?
+                WHERE p.tenant_id = ?
                 ORDER BY p.name
                 """,
-                (tenant_id,),
+                (tenant_id, tenant_id),
             )
             rows = cur.fetchall()
             return [dict(r) for r in rows]
@@ -239,10 +239,10 @@ class SQLiteStorage(BaseStorage):
                        pv.created_by, pv.tag, pv.is_active
                 FROM prompt_versions pv
                 JOIN prompts p ON p.id = pv.prompt_id
-                WHERE p.name = ? AND (p.tenant_id = ? OR p.tenant_id IS NULL)
+                WHERE p.name = ? AND p.tenant_id = ? AND pv.tenant_id = ?
                 ORDER BY pv.version_number DESC
                 """,
-                (name, tenant_id),
+                (name, tenant_id, tenant_id),
             )
             rows = cur.fetchall()
             return [dict(r) for r in rows]
@@ -255,7 +255,7 @@ class SQLiteStorage(BaseStorage):
             return None
         def _fn(conn):
             cur = conn.cursor()
-            cur.execute("SELECT * FROM prompt_versions WHERE id = ?", (v_id,))
+            cur.execute("SELECT * FROM prompt_versions WHERE id = ? AND tenant_id = ?", (v_id, tenant_id))
             row = cur.fetchone()
             return dict(row) if row else None
         return await asyncio.to_thread(self._run_sqlite, _fn)
@@ -312,14 +312,14 @@ class SQLiteStorage(BaseStorage):
 
         def _fn(conn):
             cur = conn.cursor()
-            cur.execute("SELECT prompt_id FROM prompt_versions WHERE id = ?", (v_id,))
+            cur.execute("SELECT prompt_id FROM prompt_versions WHERE id = ? AND tenant_id = ?", (v_id, tenant_id))
             row = cur.fetchone()
             if not row:
                 return False
             prompt_id = row[0]
 
-            cur.execute("UPDATE prompt_versions SET is_active = 0 WHERE prompt_id = ?", (prompt_id,))
-            cur.execute("UPDATE prompt_versions SET is_active = 1 WHERE id = ?", (v_id,))
+            cur.execute("UPDATE prompt_versions SET is_active = 0 WHERE prompt_id = ? AND tenant_id = ?", (prompt_id, tenant_id))
+            cur.execute("UPDATE prompt_versions SET is_active = 1 WHERE id = ? AND tenant_id = ?", (v_id, tenant_id))
             return True
 
         return await asyncio.to_thread(self._run_sqlite, _fn)
@@ -347,7 +347,7 @@ class SQLiteStorage(BaseStorage):
                 output_text = log.get("output_text", "")
 
                 cur.execute(
-                    "SELECT id FROM prompts WHERE name = ? AND (tenant_id = ? OR tenant_id IS NULL)",
+                    "SELECT id FROM prompts WHERE name = ? AND tenant_id = ?",
                     (prompt_name, tenant_id),
                 )
                 row = cur.fetchone()
@@ -375,10 +375,10 @@ class SQLiteStorage(BaseStorage):
                     FROM prompt_logs pl
                     JOIN prompts p ON p.id = pl.prompt_id
                     JOIN prompt_versions pv ON pv.id = pl.version_id
-                    WHERE p.name = ? AND (p.tenant_id = ? OR p.tenant_id IS NULL)
+                    WHERE p.name = ? AND p.tenant_id = ? AND pl.tenant_id = ?
                     ORDER BY pl.timestamp DESC LIMIT ?
                     """,
-                    (prompt_name, tenant_id, limit),
+                    (prompt_name, tenant_id, tenant_id, limit),
                 )
             else:
                 cur.execute(
@@ -388,10 +388,10 @@ class SQLiteStorage(BaseStorage):
                     FROM prompt_logs pl
                     JOIN prompts p ON p.id = pl.prompt_id
                     JOIN prompt_versions pv ON pv.id = pl.version_id
-                    WHERE p.tenant_id = ? OR p.tenant_id IS NULL
+                    WHERE p.tenant_id = ? AND pl.tenant_id = ?
                     ORDER BY pl.timestamp DESC LIMIT ?
                     """,
-                    (tenant_id, limit),
+                    (tenant_id, tenant_id, limit),
                 )
             rows = cur.fetchall()
             return [dict(r) for r in rows]
@@ -406,10 +406,10 @@ class SQLiteStorage(BaseStorage):
                 SELECT p.name, pv.content
                 FROM prompt_versions pv
                 JOIN prompts p ON p.id = pv.prompt_id
-                WHERE pv.is_active = 1 AND (p.tenant_id = ? OR p.tenant_id IS NULL)
+                WHERE pv.is_active = 1 AND p.tenant_id = ? AND pv.tenant_id = ?
                 ORDER BY p.name
                 """,
-                (tenant_id,),
+                (tenant_id, tenant_id),
             )
             rows = cur.fetchall()
             return {row["name"]: row["content"] for row in rows}
@@ -432,10 +432,10 @@ class SQLiteStorage(BaseStorage):
                 created.append(name)
         return {"created": created, "updated": updated}
 
-    async def get_user(self, username: str) -> Optional[Dict[str, Any]]:
+    async def get_user(self, username: str, tenant_id: str = "default") -> Optional[Dict[str, Any]]:
         def _fn(conn):
             cur = conn.cursor()
-            cur.execute("SELECT * FROM users WHERE username = ?", (username,))
+            cur.execute("SELECT * FROM users WHERE username = ? AND tenant_id = ?", (username, tenant_id))
             row = cur.fetchone()
             return dict(row) if row else None
 
@@ -452,14 +452,36 @@ class SQLiteStorage(BaseStorage):
             )
 
         await asyncio.to_thread(self._run_sqlite, _fn)
-        return await self.get_user(username)
+        return await self.get_user(username, tenant_id=tenant_id)
 
     async def fetch_users(self, tenant_id: str = "default") -> List[Dict[str, Any]]:
         def _fn(conn):
             cur = conn.cursor()
-            cur.execute("SELECT id, username, email, role, tenant_id, is_active, created_at FROM users ORDER BY username")
+            cur.execute(
+                "SELECT id, username, email, role, tenant_id, is_active, created_at FROM users WHERE tenant_id = ? ORDER BY username",
+                (tenant_id,),
+            )
             rows = cur.fetchall()
             return [dict(r) for r in rows]
+
+        return await asyncio.to_thread(self._run_sqlite, _fn)
+
+    async def migrate_missing_tenant_ids(self, tenant_id: str = "default") -> Dict[str, int]:
+        def _fn(conn):
+            cur = conn.cursor()
+            prompts_updated = cur.execute(
+                "UPDATE prompts SET tenant_id = ? WHERE tenant_id IS NULL OR tenant_id = ''",
+                (tenant_id,),
+            ).rowcount
+            versions_updated = cur.execute(
+                "UPDATE prompt_versions SET tenant_id = ? WHERE tenant_id IS NULL OR tenant_id = ''",
+                (tenant_id,),
+            ).rowcount
+            users_updated = cur.execute(
+                "UPDATE users SET tenant_id = ? WHERE tenant_id IS NULL OR tenant_id = ''",
+                (tenant_id,),
+            ).rowcount
+            return {"prompts": prompts_updated, "prompt_versions": versions_updated, "users": users_updated}
 
         return await asyncio.to_thread(self._run_sqlite, _fn)
 
