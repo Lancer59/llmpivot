@@ -35,6 +35,8 @@ class PromptManager:
         auth_mode: str = "disabled",  # "disabled", "protected", "rbac"
         secret_key: Optional[str] = None,
         log_sample_rate: float = 1.0,
+        bootstrap_admin: bool = False,
+        bootstrap_password: Optional[str] = None,
         # LLM suggester (all optional)
         llm_url: Optional[str] = None,
         llm_api_key: Optional[str] = None,
@@ -50,6 +52,8 @@ class PromptManager:
         self.admin_password = admin_password
         self.secret_key = secret_key or "llmpivot-secret-key-change-me"
         self.log_sample_rate = log_sample_rate
+        self.bootstrap_admin = bootstrap_admin
+        self.bootstrap_password = bootstrap_password
 
         if protected_mode and auth_mode == "disabled":
             self.auth_mode = "protected"
@@ -95,10 +99,14 @@ class PromptManager:
 
     async def _bootstrap_admin(self) -> None:
         try:
+            if not self.bootstrap_admin:
+                return
+
             admin_user = await self.storage.get_user("admin")
             if not admin_user:
                 from .auth import hash_password
-                pwd_hash = hash_password("admin")
+                password = self.bootstrap_password or "admin"
+                pwd_hash = hash_password(password)
                 await self.storage.create_user(
                     username="admin",
                     password_hash=pwd_hash,
@@ -106,7 +114,7 @@ class PromptManager:
                     email="admin@llmpivot.local",
                     tenant_id=self.tenant_id,
                 )
-                logger.info("Default admin user 'admin' created successfully with password 'admin'.")
+                logger.info("Admin user 'admin' created successfully.")
         except Exception as exc:
             logger.debug("Bootstrap admin check skipped: %s", exc)
 

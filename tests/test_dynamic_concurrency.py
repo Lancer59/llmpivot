@@ -23,6 +23,8 @@ class DynamicConcurrencyAndEndToEndTests(unittest.TestCase):
             tenant_id="org_dynamic",
             auth_mode="rbac",
             secret_key="dynamic-test-secret",
+            bootstrap_admin=True,
+            bootstrap_password="admin",
         )
 
         self.app = FastAPI()

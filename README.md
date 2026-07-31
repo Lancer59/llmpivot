@@ -10,7 +10,7 @@ Change a prompt in the web UI and see it reflected in your running app instantly
 
 - **Runtime Control**: Dynamic prompt iteration with instant in-memory caching.
 - **Multi-User Concurrency & Multi-Tenancy**: Built for high-traffic apps with SQLite WAL mode, async queue batch logging, and workspace isolation (`tenant_id`).
-- **Authentication & RBAC**: Default admin bootstrap (`admin / admin`), session JWT cookies, PBKDF2 password security, and Role-Based Access Control (`admin`, `editor`, `viewer`).
+- **Authentication & RBAC**: Optional admin bootstrap with explicit credentials, session JWT cookies, PBKDF2 password security, and Role-Based Access Control (`admin`, `editor`, `viewer`).
 - **Pluggable Storage Engines**: Support for file-based **SQLite** out-of-the-box and **MongoDB** NoSQL database backends.
 - **AI Prompt Suggestions & A/B Testing**: Integrated OpenAI-compatible AI prompt improver and side-by-side version comparison.
 - **Fail-Safe Resilience**: Stale-cache serving if the database goes down — your application never crashes.
@@ -109,14 +109,30 @@ manager = PromptManager(
 )
 ```
 
-### Default Login Credentials
-When authentication is enabled, `llmpivot` automatically bootstraps a default super-admin user on first startup:
-- **Username**: `admin`
-- **Password**: `admin`
+### Admin Bootstrap
+When authentication is enabled, you can optionally bootstrap an initial super-admin user explicitly:
+
+```python
+manager = PromptManager(
+    db_path="prompts.db",
+    auth_mode="rbac",
+    secret_key="your-secure-secret-key-here",
+    bootstrap_admin=True,
+    bootstrap_password="choose-a-strong-password",
+)
+```
+
+What these values mean:
+- `secret_key`: a long random string used to sign login sessions. Think of it as the private key for your app's auth cookies.
+- `bootstrap_admin`: whether to create an initial admin account automatically on first startup.
+- `bootstrap_password`: the password for that initial admin account.
+- Username: the initial admin username is always `admin`.
+
+If you do not enable `bootstrap_admin`, no default admin account is created.
 
 ### Authentication Flow
 1. Navigating to any `/prompts` route redirects unauthenticated users directly to `/prompts/login`.
-2. Login with `admin / admin`.
+2. Log in with the admin account you created during bootstrap.
 3. Once logged in as `admin`, an **"Users"** button appears in the top navigation bar.
 4. Click **Users** (`/prompts/users`) to create new team members and assign roles (`admin`, `editor`, `viewer`).
 

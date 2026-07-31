@@ -18,6 +18,8 @@ class APIAndRoutesTests(unittest.TestCase):
             db_path=self.db_path,
             auth_mode="rbac",
             secret_key="test-secret-key",
+            bootstrap_admin=True,
+            bootstrap_password="admin",
             llm_url="https://mock-llm.com/v1/chat/completions",
             llm_api_key="sk-mock",
         )
@@ -38,6 +40,19 @@ class APIAndRoutesTests(unittest.TestCase):
         res = self.client.get("/prompts/list")
         self.assertEqual(res.status_code, 303)
         self.assertTrue(res.headers["location"].endswith("/prompts/login"))
+
+    def test_admin_bootstrap_requires_explicit_opt_in(self):
+        import asyncio
+
+        manager = PromptManager(
+            db_path=self.db_path,
+            auth_mode="rbac",
+            secret_key="another-test-secret",
+        )
+        asyncio.run(manager._bootstrap_admin())
+
+        user = asyncio.run(manager.storage.get_user("admin"))
+        self.assertIsNone(user)
 
     def test_login_flow(self):
         # Bootstrap default admin check
