@@ -1,10 +1,31 @@
-# Core dependencies for llmpivot
+# -----------------------------------------------------------------------
+# llmpivot — runtime dependencies
+# Install all: pip install -r requirements.txt
+# -----------------------------------------------------------------------
+
+# Core framework + async HTTP
 fastapi>=0.110.0
 httpx>=0.27.0
+python-multipart>=0.0.9   # multipart form uploads (import, file fields)
+
+# Async SQLite driver (used by default storage backend)
 aiosqlite>=0.20.0
-python-multipart>=0.0.9
+
+# ASGI server — needed to run the app
 uvicorn>=0.29.0
 
-# Optional MongoDB support (uncomment if using MongoDB backend)
+# Password hashing — Argon2id (strongly recommended for production)
+# Falls back to PBKDF2-SHA256 (stdlib) if not installed, but Argon2id
+# is significantly stronger and faster to attack-resist.
+argon2-cffi>=23.1.0
+
+# -----------------------------------------------------------------------
+# Optional — uncomment as needed
+# -----------------------------------------------------------------------
+
+# MongoDB storage backend
 # motor>=3.3.0
 # pymongo>=4.6.0
+
+# bcrypt (alternative to argon2-cffi — either one works)
+# bcrypt>=4.1.0

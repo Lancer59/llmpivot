@@ -35,7 +35,8 @@ dependencies = [
 [project.optional-dependencies]
 server = ["uvicorn>=0.29.0"]
 mongo = ["motor>=3.3.0", "pymongo>=4.6.0"]
-all = ["uvicorn>=0.29.0", "motor>=3.3.0", "pymongo>=4.6.0"]
+security = ["argon2-cffi>=23.1.0"]
+all = ["uvicorn>=0.29.0", "motor>=3.3.0", "pymongo>=4.6.0", "argon2-cffi>=23.1.0"]
 
 [project.urls]
 Homepage = "https://github.com/Lancer59/llmpivot"
