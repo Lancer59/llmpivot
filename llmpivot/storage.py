@@ -174,6 +174,52 @@ class BaseStorage(ABC):
         """fetch_all_prompts enriched with prompt_type and parent info for the tree view."""
         return []
 
+    # ------------------------------------------------------------------
+    # Pivot observations — Phase 2
+    # ------------------------------------------------------------------
+
+    async def save_observation(
+        self,
+        obs_type: str,
+        content: str,
+        page_context: str = "",
+        user_id: Optional[int] = None,
+        action_payload: Optional[str] = None,
+        tenant_id: str = "default",
+    ) -> int:
+        return 0
+
+    async def fetch_observations(
+        self,
+        page_context: str = "",
+        limit: int = 20,
+        tenant_id: str = "default",
+    ) -> List[Dict[str, Any]]:
+        return []
+
+    # ------------------------------------------------------------------
+    # Pivot conversations — Phase 2
+    # ------------------------------------------------------------------
+
+    async def save_conversation_turn(
+        self,
+        session_id: str,
+        role: str,
+        content: str,
+        tool_calls: Optional[str] = None,
+        tool_results: Optional[str] = None,
+        tenant_id: str = "default",
+    ) -> None:
+        pass
+
+    async def fetch_conversation_history(
+        self,
+        session_id: str,
+        limit: int = 20,
+        tenant_id: str = "default",
+    ) -> List[Dict[str, Any]]:
+        return []
+
 
 # ---------------------------------------------------------------------------
 # SQLite implementation
@@ -277,6 +323,29 @@ class SQLiteStorage(BaseStorage):
             version    INTEGER DEFAULT 1,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             created_by TEXT DEFAULT ''
+        );
+
+        CREATE TABLE IF NOT EXISTS pivot_observations (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            tenant_id      TEXT DEFAULT 'default',
+            user_id        INTEGER,
+            page_context   TEXT,
+            obs_type       TEXT NOT NULL,
+            content        TEXT NOT NULL,
+            action_payload TEXT,
+            dismissed      INTEGER DEFAULT 0,
+            created_at     DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS pivot_conversations (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            tenant_id      TEXT DEFAULT 'default',
+            session_id     TEXT NOT NULL,
+            role           TEXT NOT NULL,
+            content        TEXT NOT NULL,
+            tool_calls     TEXT,
+            tool_results   TEXT,
+            created_at     DATETIME DEFAULT CURRENT_TIMESTAMP
         );
         """)
 
@@ -959,6 +1028,96 @@ class SQLiteStorage(BaseStorage):
                 (tenant_id, tenant_id, tenant_id),
             )
             return [dict(r) for r in cur.fetchall()]
+        return await asyncio.to_thread(self._run_sqlite, _fn)
+
+    # ------------------------------------------------------------------
+    # Pivot observations — Phase 2
+    # ------------------------------------------------------------------
+
+    async def save_observation(
+        self,
+        obs_type: str,
+        content: str,
+        page_context: str = "",
+        user_id: Optional[int] = None,
+        action_payload: Optional[str] = None,
+        tenant_id: str = "default",
+    ) -> int:
+        def _fn(conn):
+            cur = conn.cursor()
+            cur.execute(
+                """INSERT INTO pivot_observations
+                   (tenant_id, user_id, page_context, obs_type, content, action_payload)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (tenant_id, user_id, page_context, obs_type, content, action_payload),
+            )
+            return cur.lastrowid
+        return await asyncio.to_thread(self._run_sqlite, _fn)
+
+    async def fetch_observations(
+        self,
+        page_context: str = "",
+        limit: int = 20,
+        tenant_id: str = "default",
+    ) -> List[Dict[str, Any]]:
+        def _fn(conn):
+            cur = conn.cursor()
+            if page_context:
+                cur.execute(
+                    """SELECT * FROM pivot_observations
+                       WHERE tenant_id = ? AND page_context = ? AND dismissed = 0
+                       ORDER BY created_at DESC LIMIT ?""",
+                    (tenant_id, page_context, limit),
+                )
+            else:
+                cur.execute(
+                    """SELECT * FROM pivot_observations
+                       WHERE tenant_id = ? AND dismissed = 0
+                       ORDER BY created_at DESC LIMIT ?""",
+                    (tenant_id, limit),
+                )
+            return [dict(r) for r in cur.fetchall()]
+        return await asyncio.to_thread(self._run_sqlite, _fn)
+
+    # ------------------------------------------------------------------
+    # Pivot conversations — Phase 2
+    # ------------------------------------------------------------------
+
+    async def save_conversation_turn(
+        self,
+        session_id: str,
+        role: str,
+        content: str,
+        tool_calls: Optional[str] = None,
+        tool_results: Optional[str] = None,
+        tenant_id: str = "default",
+    ) -> None:
+        def _fn(conn):
+            conn.execute(
+                """INSERT INTO pivot_conversations
+                   (tenant_id, session_id, role, content, tool_calls, tool_results)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (tenant_id, session_id, role, content, tool_calls, tool_results),
+            )
+        await asyncio.to_thread(self._run_sqlite, _fn)
+
+    async def fetch_conversation_history(
+        self,
+        session_id: str,
+        limit: int = 20,
+        tenant_id: str = "default",
+    ) -> List[Dict[str, Any]]:
+        def _fn(conn):
+            cur = conn.cursor()
+            cur.execute(
+                """SELECT role, content, tool_calls, tool_results, created_at
+                   FROM pivot_conversations
+                   WHERE tenant_id = ? AND session_id = ?
+                   ORDER BY id DESC LIMIT ?""",
+                (tenant_id, session_id, limit),
+            )
+            rows = cur.fetchall()
+            return list(reversed([dict(r) for r in rows]))
         return await asyncio.to_thread(self._run_sqlite, _fn)
 
     # ------------------------------------------------------------------

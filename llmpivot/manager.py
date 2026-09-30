@@ -56,17 +56,36 @@ class PromptManager:
         log_sample_rate: float = 1.0,
         bootstrap_admin: bool = False,
         bootstrap_password: Optional[str] = None,
-        # LLM suggester (all optional)
+        # ----------------------------------------------------------------
+        # LLM configuration
+        # ----------------------------------------------------------------
         llm_url: Optional[str] = None,
         llm_api_key: Optional[str] = None,
         llm_model: str = "gpt-3.5-turbo",
+        # API type: "openai" | "azure" | None (auto-detected from URL)
+        llm_api_type: Optional[str] = None,
+        # Token limit — set one at most; None = auto-detect from model name
+        llm_max_tokens: Optional[int] = None,
+        llm_max_completion_tokens: Optional[int] = None,
+        # Generation params — None = omit (new-gen models reject temperature)
+        llm_temperature: Optional[float] = None,
+        llm_top_p: Optional[float] = None,
+        # Any extra body params e.g. {"response_format": {"type": "json_object"}}
+        llm_extra_params: Optional[dict] = None,
+        # Request timeout in seconds
+        llm_timeout: float = 30.0,
+        # Custom system prompt for the AI suggest feature
         llm_suggester_prompt: Optional[str] = None,
-        # Phase 1 Pivot params
-        pivot_enabled: bool = False,          # master switch for all Pivot features
+        # ----------------------------------------------------------------
+        # Assistant agent (Phase 2)
+        # ----------------------------------------------------------------
+        pivot_enabled: bool = False,          # master on/off switch
         pivot_proactive: bool = True,          # proactive observations; False = chat-only
         auto_changelog: bool = True,           # auto-generate changelog on version save
-        pivot_model: Optional[str] = None,     # LLM model for Pivot; defaults to llm_model
+        pivot_model: Optional[str] = None,     # override model for Assistant; defaults to llm_model
+        # ----------------------------------------------------------------
         # Fallback snapshot
+        # ----------------------------------------------------------------
         fallback_snapshot: bool = True,        # write prompts_fallback.json on activation + warm
         fallback_path: Optional[str] = None,   # override path; default = next to db_path
     ):
@@ -146,6 +165,13 @@ class PromptManager:
                 api_key=llm_api_key or "",
                 model=llm_model,
                 system_prompt=llm_suggester_prompt,
+                api_type=llm_api_type,
+                max_tokens=llm_max_tokens,
+                max_completion_tokens=llm_max_completion_tokens,
+                temperature=llm_temperature,
+                top_p=llm_top_p,
+                extra_params=llm_extra_params,
+                timeout=llm_timeout,
             )
 
         _instance = self

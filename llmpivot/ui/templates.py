@@ -33,7 +33,7 @@ def _csrf_field(csrf_token: Optional[str]) -> str:
     return f'<input type="hidden" name="csrf_token" value="{_escape(csrf_token)}">'
 
 
-def _layout(title: str, body: str, protected: bool = False, base: str = "", user: Optional[dict] = None) -> str:
+def _layout(title: str, body: str, protected: bool = False, base: str = "", user: Optional[dict] = None, pivot_widget: str = "") -> str:
     badge = '<span class="nav-badge">PROTECTED</span>' if protected else ""
     user_nav = render_user_badge(user, base) if user else ""
 
@@ -195,11 +195,12 @@ def _layout(title: str, body: str, protected: bool = False, base: str = "", user
 <main class="container">
 {body}
 </main>
+{pivot_widget}
 </body>
 </html>"""
 
 
-def prompt_list(prompts: list, protected: bool = False, base: str = "", user: Optional[dict] = None) -> str:
+def prompt_list(prompts: list, protected: bool = False, base: str = "", user: Optional[dict] = None, pivot_widget: str = "") -> str:
     rows = ""
     for p in prompts:
         v = p.get("active_version")
@@ -246,7 +247,7 @@ def prompt_list(prompts: list, protected: bool = False, base: str = "", user: Op
     <tbody>{rows}</tbody>
   </table>
 </div>"""
-    return _layout("Home", body, protected, base, user)
+    return _layout("Home", body, protected, base, user, pivot_widget)
 
 
 def prompt_detail(
@@ -256,6 +257,7 @@ def prompt_detail(
     base: str = "",
     user: Optional[dict] = None,
     csrf_token: Optional[str] = None,
+    pivot_widget: str = "",
 ) -> str:
     csrf = _csrf_field(csrf_token)
     v_rows = ""
@@ -322,7 +324,7 @@ def prompt_detail(
     <tbody>{v_rows}</tbody>
   </table>
 </div>"""
-    return _layout(f"Detail: {name}", body, protected, base, user)
+    return _layout(f"Detail: {name}", body, protected, base, user, pivot_widget)
 
 
 def edit_page(
@@ -337,6 +339,7 @@ def edit_page(
     csrf_token: Optional[str] = None,
     children: Optional[List[Dict[str, Any]]] = None,
     metadata: Optional[Dict[str, Any]] = None,
+    pivot_widget: str = "",
 ) -> str:
     err_div = f'<div class="error">{error}</div>' if error else ""
     csrf = _csrf_field(csrf_token)
@@ -449,7 +452,7 @@ def edit_page(
   </div>
 </form>
 {script_tag}"""
-    return _layout(title_text, body, protected, base, user)
+    return _layout(title_text, body, protected, base, user, pivot_widget)
 
 
 def diff_page(
@@ -1033,7 +1036,7 @@ def app_context_page(
   <div>
     <h1>Application Context</h1>
     <p class="text-muted" style="font-size:.88rem;margin-top:4px;">
-      Describe your application once. Pivot reads this as its background knowledge on every analysis.
+      Describe your application once. Assistant reads this as its background knowledge on every analysis.
     </p>
     {version_info}
   </div>
@@ -1085,7 +1088,7 @@ def app_context_page(
     </div>
     <div class="card" style="margin-top:16px;background:rgba(145,200,255,.04);border-color:rgba(145,200,255,.12);">
       <p style="font-size:.82rem;color:#8ab4d4;line-height:1.6;">
-        Pivot reads this document before every suggestion, changelog generation,
+        Assistant reads this document before every suggestion, changelog generation,
         and consistency check — so the more detail you add, the more accurate
         and useful its analysis will be.
       </p>
@@ -1222,3 +1225,440 @@ def _hierarchy_warning_panel(children: list, base: str, parent_name: str) -> str
     </div>
   </div>
 </div>"""
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 — Pivot floating widget
+# ---------------------------------------------------------------------------
+
+def pivot_widget_html(base: str, pivot_enabled: bool, pivot_proactive: bool) -> str:
+    """
+    Return the HTML+JS snippet for the Pivot floating widget.
+    Injected just before </body> in the base layout when pivot_enabled=True.
+
+    Uses:
+      - Alpine.js (CDN) for reactive widget state
+      - Native EventSource for SSE observation feed (proactive)
+      - Native fetch() for chunked HTTP chat replies
+    """
+    if not pivot_enabled:
+        return ""
+
+    observe_url = f"{base}/pivot/observe"
+    chat_url = f"{base}/pivot/chat"
+
+    return f"""
+<!-- Pivot Floating Widget -->
+<script src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.9/dist/cdn.min.js" defer></script>
+
+<style>
+#pivot-widget {{
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  z-index: 9999;
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+  font-size: 14px;
+  --pw-bg: #0e1728;
+  --pw-surface: #162237;
+  --pw-border: rgba(145,200,255,.18);
+  --pw-accent: #91c8ff;
+  --pw-text: #edf4fc;
+  --pw-muted: #8fa1b8;
+  --pw-obs: #8fa1b8;
+  --pw-alert: #f2cd8f;
+  --pw-warn: #ffb4b4;
+  --pw-suggest: #91c8ff;
+}}
+#pivot-pill {{
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--pw-surface);
+  border: 1px solid var(--pw-border);
+  border-radius: 99px;
+  padding: 8px 14px 8px 10px;
+  cursor: pointer;
+  box-shadow: 0 8px 32px rgba(0,0,0,.4);
+  transition: box-shadow .2s, transform .15s;
+  user-select: none;
+}}
+#pivot-pill:hover {{ transform: translateY(-2px); box-shadow: 0 12px 40px rgba(0,0,0,.5); }}
+.pivot-dot {{
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--pw-accent);
+  box-shadow: 0 0 8px var(--pw-accent);
+  flex-shrink: 0;
+}}
+.pivot-dot.thinking {{ background: #f2cd8f; box-shadow: 0 0 8px #f2cd8f; animation: pulse 1.2s ease-in-out infinite; }}
+.pivot-dot.alert    {{ background: #f2cd8f; box-shadow: 0 0 8px #f2cd8f; }}
+.pivot-dot.warn     {{ background: #ffb4b4; box-shadow: 0 0 8px #ffb4b4; }}
+@keyframes pulse {{ 0%,100%{{opacity:1}} 50%{{opacity:.4}} }}
+.pivot-label {{ color: var(--pw-text); font-size: .8rem; font-weight: 620; }}
+.pivot-preview {{ color: var(--pw-muted); font-size: .75rem; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+#pivot-panel {{
+  position: fixed;
+  bottom: 80px;
+  right: 24px;
+  width: 380px;
+  max-height: 560px;
+  background: var(--pw-bg);
+  border: 1px solid var(--pw-border);
+  border-radius: 16px;
+  box-shadow: 0 24px 80px rgba(0,0,0,.6);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}}
+.pw-header {{
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px 10px;
+  border-bottom: 1px solid var(--pw-border);
+}}
+.pw-title {{ color: var(--pw-accent); font-weight: 700; font-size: .9rem; letter-spacing: -.02em; }}
+.pw-close {{
+  background: none; border: none; color: var(--pw-muted);
+  cursor: pointer; font-size: 1.1rem; padding: 2px 6px; border-radius: 6px;
+  transition: background .15s;
+}}
+.pw-close:hover {{ background: rgba(145,200,255,.1); color: var(--pw-text); }}
+.pw-feed {{
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(145,200,255,.15) transparent;
+}}
+.pw-obs {{
+  padding: 9px 12px;
+  border-radius: 9px;
+  font-size: .8rem;
+  line-height: 1.5;
+  border: 1px solid transparent;
+  animation: fadeIn .25s ease;
+}}
+@keyframes fadeIn {{ from{{opacity:0;transform:translateY(4px)}} to{{opacity:1;transform:none}} }}
+.pw-obs.observation {{ background: rgba(143,161,184,.06); border-color: rgba(143,161,184,.15); color: var(--pw-obs); }}
+.pw-obs.alert       {{ background: rgba(242,205,143,.07); border-color: rgba(242,205,143,.2); color: #c9a85a; }}
+.pw-obs.warning     {{ background: rgba(255,180,180,.07); border-color: rgba(255,180,180,.2); color: #ffb4b4; }}
+.pw-obs.suggestion  {{ background: rgba(145,200,255,.07); border-color: rgba(145,200,255,.18); color: var(--pw-suggest); }}
+.pw-obs-icon {{ font-size: .85rem; margin-right: 6px; }}
+.pw-obs-action {{
+  display: inline-block;
+  margin-top: 5px;
+  font-size: .72rem;
+  padding: 3px 8px;
+  border-radius: 6px;
+  background: rgba(145,200,255,.12);
+  color: var(--pw-accent);
+  cursor: pointer;
+  border: 1px solid rgba(145,200,255,.2);
+  text-decoration: none;
+}}
+.pw-obs-action:hover {{ background: rgba(145,200,255,.2); }}
+.pw-empty {{ color: var(--pw-muted); font-size: .8rem; text-align: center; padding: 20px 0; }}
+.pw-chat {{
+  border-top: 1px solid var(--pw-border);
+  padding: 10px 12px;
+  display: flex;
+  gap: 8px;
+  align-items: flex-end;
+}}
+.pw-input {{
+  flex: 1;
+  background: rgba(255,255,255,.04);
+  border: 1px solid rgba(145,200,255,.18);
+  border-radius: 9px;
+  padding: 8px 10px;
+  color: var(--pw-text);
+  font: inherit;
+  font-size: .8rem;
+  resize: none;
+  min-height: 36px;
+  max-height: 100px;
+  overflow-y: auto;
+  outline: none;
+}}
+.pw-input:focus {{ border-color: var(--pw-accent); background: rgba(145,200,255,.04); }}
+.pw-input::placeholder {{ color: var(--pw-muted); }}
+.pw-send {{
+  background: var(--pw-accent);
+  color: #091522;
+  border: none;
+  border-radius: 8px;
+  padding: 7px 12px;
+  font: inherit;
+  font-size: .8rem;
+  font-weight: 700;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background .15s;
+}}
+.pw-send:hover {{ background: #c1e4ff; }}
+.pw-send:disabled {{ opacity: .5; cursor: not-allowed; }}
+.pw-msg {{ padding: 8px 10px; border-radius: 9px; font-size: .8rem; line-height: 1.5; animation: fadeIn .2s ease; }}
+.pw-msg.user {{ background: rgba(145,200,255,.1); color: var(--pw-text); align-self: flex-end; max-width: 88%; }}
+.pw-msg.assistant {{ background: rgba(255,255,255,.04); color: #c8d8ec; max-width: 96%; }}
+.pw-msg.tool_call {{ color: var(--pw-muted); font-style: italic; font-size: .75rem; }}
+.pw-msg.error {{ color: #ffb4b4; font-size: .75rem; }}
+@media (max-width: 480px) {{
+  #pivot-panel {{ width: calc(100vw - 32px); right: 16px; bottom: 76px; }}
+}}
+</style>
+
+<div id="pivot-widget"
+     x-data="pivotWidget()"
+     x-init="init()"
+     @keydown.escape.window="open = false">
+
+  <!-- Collapsed pill -->
+  <div id="pivot-pill" @click="open = !open" x-show="true" :title="open ? 'Close Assistant' : 'Open Assistant'">
+    <div class="pivot-dot" :class="dotClass"></div>
+    <span class="pivot-label">Assistant</span>
+    <span class="pivot-preview" x-text="pillPreview" x-show="!open && pillPreview"></span>
+  </div>
+
+  <!-- Expanded panel -->
+  <div id="pivot-panel" x-show="open" x-transition:enter="fadeIn" style="display:none;">
+
+    <div class="pw-header">
+      <span class="pw-title">✦ Assistant</span>
+      <div style="display:flex;gap:6px;align-items:center;">
+        <span style="font-size:.72rem;color:var(--pw-muted);" x-text="statusLabel"></span>
+        <button class="pw-close" @click="open = false" title="Close">✕</button>
+      </div>
+    </div>
+
+    <!-- Feed (observations + chat messages interleaved) -->
+    <div class="pw-feed" x-ref="feed">
+      <!-- Observations -->
+      <template x-for="obs in observations" :key="obs.id">
+        <div class="pw-obs" :class="obs.type">
+          <span class="pw-obs-icon" x-text="obsIcon(obs.type)"></span>
+          <span x-text="obs.content"></span>
+          <template x-if="obs.action">
+            <div>
+              <a class="pw-obs-action" :href="obs.action.url" x-text="obs.action.label"></a>
+            </div>
+          </template>
+        </div>
+      </template>
+
+      <!-- Chat messages -->
+      <template x-for="msg in messages" :key="msg.id">
+        <div class="pw-msg" :class="msg.role" x-text="msg.content"></div>
+      </template>
+
+      <!-- Empty state -->
+      <div class="pw-empty" x-show="observations.length === 0 && messages.length === 0 && !loading">
+        Ask Assistant anything about your prompts.
+      </div>
+      <div class="pw-empty" x-show="loading" style="color:var(--pw-accent);">
+        Analysing…
+      </div>
+    </div>
+
+    <!-- Chat input -->
+    <div class="pw-chat">
+      <textarea
+        class="pw-input"
+        x-model="chatInput"
+        placeholder="Ask Assistant…"
+        rows="1"
+        @keydown.enter.prevent="if (!$event.shiftKey) sendChat()"
+        @input="autoResize($event.target)"
+      ></textarea>
+      <button class="pw-send" @click="sendChat()" :disabled="chatBusy || !chatInput.trim()">→</button>
+    </div>
+  </div>
+</div>
+
+<script>
+function pivotWidget() {{
+  return {{
+    open: false,
+    loading: false,
+    chatBusy: false,
+    chatInput: '',
+    observations: [],
+    messages: [],
+    sessionId: null,
+    dotClass: 'idle',
+    statusLabel: 'idle',
+    pillPreview: '',
+    _obsSource: null,
+    _obsCounter: 0,
+    _msgCounter: 0,
+
+    init() {{
+      // Restore open state from localStorage
+      try {{
+        this.open = localStorage.getItem('pivot_open') === '1';
+      }} catch(e) {{}}
+      this.$watch('open', v => {{
+        try {{ localStorage.setItem('pivot_open', v ? '1' : '0'); }} catch(e) {{}}
+        if (v) this.loadObservations();
+      }});
+      // Generate a session ID for this browser session
+      this.sessionId = sessionStorage.getItem('pivot_session') || this._uuid();
+      sessionStorage.setItem('pivot_session', this.sessionId);
+      // Auto-load if already open
+      if (this.open) this.loadObservations();
+    }},
+
+    loadObservations() {{
+      if (this._obsSource) {{ this._obsSource.close(); this._obsSource = null; }}
+      this.observations = [];
+      this.loading = true;
+      this.dotClass = 'thinking';
+      this.statusLabel = 'analysing…';
+
+      const page = window.location.pathname;
+      // Extract prompt name from URL patterns like /prompts/detail/name or /prompts/edit/name
+      const match = page.match(/\\/(?:detail|edit|metadata|changelog|diff|test)\\/([^/]+)$/);
+      const promptName = match ? decodeURIComponent(match[1]) : '';
+      const params = new URLSearchParams({{ page, prompt_name: promptName }});
+      const url = '{observe_url}?' + params.toString();
+
+      try {{
+        const src = new EventSource(url);
+        this._obsSource = src;
+
+        src.addEventListener('observation', e => this._addObs(JSON.parse(e.data)));
+        src.addEventListener('alert',       e => this._addObs(JSON.parse(e.data)));
+        src.addEventListener('warning',     e => this._addObs(JSON.parse(e.data)));
+        src.addEventListener('suggestion',  e => this._addObs(JSON.parse(e.data)));
+
+        src.addEventListener('done', () => {{
+          src.close();
+          this._obsSource = null;
+          this.loading = false;
+          this._updateDot();
+        }});
+
+        src.onerror = () => {{
+          src.close();
+          this._obsSource = null;
+          this.loading = false;
+          this._updateDot();
+        }};
+      }} catch(e) {{
+        this.loading = false;
+        this._updateDot();
+      }}
+    }},
+
+    _addObs(obs) {{
+      obs.id = ++this._obsCounter;
+      this.observations.push(obs);
+      this.pillPreview = obs.content.substring(0, 60);
+      this._updateDot();
+      this.$nextTick(() => this._scrollFeed());
+    }},
+
+    _updateDot() {{
+      const hasWarn = this.observations.some(o => o.type === 'warning');
+      const hasAlert = this.observations.some(o => o.type === 'alert');
+      if (this.loading) {{ this.dotClass = 'thinking'; this.statusLabel = 'analysing…'; }}
+      else if (hasWarn) {{ this.dotClass = 'warn'; this.statusLabel = 'needs attention'; }}
+      else if (hasAlert) {{ this.dotClass = 'alert'; this.statusLabel = 'alerts'; }}
+      else {{ this.dotClass = ''; this.statusLabel = 'ready'; }}
+    }},
+
+    async sendChat() {{
+      const msg = this.chatInput.trim();
+      if (!msg || this.chatBusy) return;
+      this.chatInput = '';
+      this.chatBusy = true;
+
+      const page = window.location.pathname;
+      const match = page.match(/\\/(?:detail|edit|metadata|changelog|diff|test)\\/([^/]+)$/);
+      const promptName = match ? decodeURIComponent(match[1]) : '';
+
+      this.messages.push({{ id: ++this._msgCounter, role: 'user', content: msg }});
+      this.$nextTick(() => this._scrollFeed());
+
+      const assistantMsgId = ++this._msgCounter;
+      this.messages.push({{ id: assistantMsgId, role: 'assistant', content: '' }});
+
+      try {{
+        const resp = await fetch('{chat_url}', {{
+          method: 'POST',
+          headers: {{ 'Content-Type': 'application/json' }},
+          body: JSON.stringify({{
+            session_id: this.sessionId,
+            message: msg,
+            context: {{ page, prompt_name: promptName }},
+          }}),
+        }});
+
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        while (true) {{
+          const {{ done, value }} = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, {{ stream: true }});
+          const lines = buffer.split('\\n');
+          buffer = lines.pop();
+          for (const line of lines) {{
+            if (!line.startsWith('data: ')) continue;
+            try {{
+              const evt = JSON.parse(line.slice(6));
+              const idx = this.messages.findIndex(m => m.id === assistantMsgId);
+              if (evt.type === 'text' && idx !== -1) {{
+                this.messages[idx].content += evt.content;
+                this.$nextTick(() => this._scrollFeed());
+              }} else if (evt.type === 'tool_call' && idx !== -1) {{
+                this.messages[idx].role = 'tool_call';
+                this.messages[idx].content = evt.content;
+              }} else if (evt.type === 'error' && idx !== -1) {{
+                this.messages[idx].role = 'error';
+                this.messages[idx].content = evt.content;
+              }} else if (evt.type === 'done') {{
+                // normalise tool_call message role back if still no text added
+                const m = this.messages.find(m => m.id === assistantMsgId);
+                if (m && m.role === 'tool_call') m.role = 'assistant';
+              }}
+            }} catch(e) {{}}
+          }}
+        }}
+      }} catch(e) {{
+        const idx = this.messages.findIndex(m => m.id === assistantMsgId);
+        if (idx !== -1) {{
+          this.messages[idx].role = 'error';
+          this.messages[idx].content = 'Network error — could not reach Assistant.';
+        }}
+      }} finally {{
+        this.chatBusy = false;
+        this.$nextTick(() => this._scrollFeed());
+      }}
+    }},
+
+    _scrollFeed() {{
+      const feed = this.$refs.feed;
+      if (feed) feed.scrollTop = feed.scrollHeight;
+    }},
+
+    obsIcon(type) {{
+      return {{ observation: 'ℹ', alert: '⚠', warning: '✕', suggestion: '→' }}[type] || '·';
+    }},
+
+    autoResize(el) {{
+      el.style.height = 'auto';
+      el.style.height = Math.min(el.scrollHeight, 100) + 'px';
+    }},
+
+    _uuid() {{
+      return 'pivot-' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+    }},
+  }};
+}}
+</script>
+"""

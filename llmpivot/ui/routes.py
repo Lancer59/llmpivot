@@ -18,6 +18,12 @@ from fastapi import APIRouter, Form, Request, UploadFile, File
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 import asyncio
 
+try:
+    from sse_starlette.sse import EventSourceResponse as SSEResponse  # type: ignore
+    _HAS_SSE_STARLETTE = True
+except ImportError:
+    _HAS_SSE_STARLETTE = False
+
 from ..auth import (
     hash_password,
     verify_password,
@@ -42,6 +48,7 @@ from .templates import (
     changelog_edit_page,
     app_context_page,
     tree_page,
+    pivot_widget_html,
 )
 from .helpers import escape as _escape
 
@@ -244,6 +251,14 @@ def _build_router(manager: "PromptManager") -> APIRouter:
         user = _get_user(request)
         return user.get("username", fallback) if user else fallback
 
+    def _widget(base: str) -> str:
+        """Generate the Pivot widget HTML for injection into pages."""
+        return pivot_widget_html(
+            base=base,
+            pivot_enabled=manager.pivot_enabled,
+            pivot_proactive=manager.pivot_proactive,
+        )
+
     # ------------------------------------------------------------------
     # Auth routes (/login, /logout)
     # ------------------------------------------------------------------
@@ -363,7 +378,8 @@ def _build_router(manager: "PromptManager") -> APIRouter:
             return auth_redirect
         user = _get_user(request)
         prompts = await manager.storage.fetch_all_prompts(tenant_id=manager.tenant_id)
-        return HTMLResponse(prompt_list(prompts, manager.protected_mode, _base(request), user=user))
+        base = _base(request)
+        return HTMLResponse(prompt_list(prompts, manager.protected_mode, base, user=user, pivot_widget=_widget(base)))
 
     # ------------------------------------------------------------------
     # Prompt detail
@@ -376,8 +392,9 @@ def _build_router(manager: "PromptManager") -> APIRouter:
             return auth_redirect
         user = _get_user(request)
         csrf = _get_csrf(request)
+        base = _base(request)
         versions = await manager.storage.fetch_prompt_versions(name, tenant_id=manager.tenant_id)
-        return HTMLResponse(prompt_detail(name, versions, manager.protected_mode, _base(request), user=user, csrf_token=csrf))
+        return HTMLResponse(prompt_detail(name, versions, manager.protected_mode, base, user=user, csrf_token=csrf, pivot_widget=_widget(base)))
 
     # ------------------------------------------------------------------
     # Edit / Create
@@ -390,8 +407,9 @@ def _build_router(manager: "PromptManager") -> APIRouter:
             return auth_redirect
         user = _get_user(request)
         csrf = _get_csrf(request)
+        base = _base(request)
         return HTMLResponse(
-            edit_page("__new__", "", manager.protected_mode, manager.has_llm, _base(request), is_new=True, user=user, csrf_token=csrf)
+            edit_page("__new__", "", manager.protected_mode, manager.has_llm, base, is_new=True, user=user, csrf_token=csrf, pivot_widget=_widget(base))
         )
 
     @router.post("/edit/__new__", response_class=HTMLResponse)
@@ -467,14 +485,15 @@ def _build_router(manager: "PromptManager") -> APIRouter:
             return auth_redirect
         user = _get_user(request)
         csrf = _get_csrf(request)
+        base = _base(request)
         versions = await manager.storage.fetch_prompt_versions(name, tenant_id=manager.tenant_id)
         active = next((v for v in versions if v["is_active"]), None)
         current = active["content"] if active else ""
         children = await manager.storage.fetch_prompt_children(name, tenant_id=manager.tenant_id)
         metadata = await manager.storage.get_prompt_metadata(name, tenant_id=manager.tenant_id)
         return HTMLResponse(
-            edit_page(name, current, manager.protected_mode, manager.has_llm, _base(request),
-                      user=user, csrf_token=csrf, children=children, metadata=metadata)
+            edit_page(name, current, manager.protected_mode, manager.has_llm, base,
+                      user=user, csrf_token=csrf, children=children, metadata=metadata, pivot_widget=_widget(base))
         )
 
     @router.post("/edit/{name}", response_class=HTMLResponse)
@@ -1008,6 +1027,121 @@ def _build_router(manager: "PromptManager") -> APIRouter:
         return HTMLResponse(
             app_context_page(ctx, manager.protected_mode, base, user=user, csrf_token=csrf,
                              success="Application context saved.")
+        )
+
+    # ------------------------------------------------------------------
+    # Phase 2 — Pivot observe (SSE) and chat (chunked HTTP)
+    # ------------------------------------------------------------------
+
+    @router.get("/pivot/observe")
+    async def pivot_observe(request: Request, page: str = "", prompt_name: str = ""):
+        """
+        SSE endpoint: stream proactive observations for the current page context.
+        The client opens a persistent EventSource connection; events are streamed
+        as they become available and a 'done' event closes the stream.
+        """
+        if not manager.pivot_enabled:
+            return JSONResponse({"error": "Pivot is not enabled."}, status_code=404)
+
+        auth_redirect = _check_auth(request, min_role="viewer")
+        if auth_redirect:
+            # Can't redirect SSE — return 401
+            return JSONResponse({"error": "Authentication required."}, status_code=401)
+
+        context = {
+            "page": page,
+            "prompt_name": prompt_name,
+            "tenant_id": manager.tenant_id,
+        }
+
+        from ..pivot import PivotAgent
+
+        async def event_generator():
+            agent = PivotAgent(manager)
+            try:
+                async for obs in agent.observe(context):
+                    obs_type = obs.get("type", "observation")
+                    yield {
+                        "event": obs_type,
+                        "data": json.dumps(obs),
+                    }
+                    # Small yield so the loop can flush
+                    await asyncio.sleep(0)
+            except asyncio.CancelledError:
+                pass
+            finally:
+                yield {"event": "done", "data": "{}"}
+
+        # Use sse-starlette if available, otherwise fall back to StreamingResponse
+        if _HAS_SSE_STARLETTE:
+            return SSEResponse(event_generator(), ping=15)
+
+        # Fallback: manual SSE via StreamingResponse
+        async def manual_sse():
+            async for event in event_generator():
+                evt_name = event.get("event", "message")
+                evt_data = event.get("data", "")
+                yield f"event: {evt_name}\ndata: {evt_data}\n\n"
+
+        return StreamingResponse(
+            manual_sse(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+                "Connection": "keep-alive",
+            },
+        )
+
+    @router.post("/pivot/chat")
+    async def pivot_chat(request: Request):
+        """
+        Chunked HTTP endpoint: stream Pivot's chat reply token by token.
+        Request body: {"session_id": str, "message": str, "context": {...}}
+        Each chunk is a JSON line: {"type": "text"|"tool_call"|"error"|"done", "content": str}
+        """
+        if not manager.pivot_enabled:
+            return JSONResponse({"error": "Pivot is not enabled."}, status_code=404)
+
+        auth_redirect = _check_auth(request, min_role="viewer")
+        if auth_redirect:
+            return JSONResponse({"error": "Authentication required."}, status_code=401)
+
+        try:
+            body = await request.json()
+            session_id = str(body.get("session_id", "default"))
+            message = str(body.get("message", "")).strip()
+            context = body.get("context", {})
+        except Exception:
+            return JSONResponse({"error": "Invalid JSON body."}, status_code=400)
+
+        if not message:
+            return JSONResponse({"error": "message is required."}, status_code=400)
+
+        from ..pivot import PivotAgent
+
+        async def stream_reply():
+            agent = PivotAgent(manager)
+            try:
+                async for chunk in agent.chat(
+                    session_id=session_id,
+                    message=message,
+                    context=context,
+                    tenant_id=manager.tenant_id,
+                ):
+                    yield chunk
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                yield "data: " + json.dumps({"type": "error", "content": str(exc)}) + "\n\n"
+
+        return StreamingResponse(
+            stream_reply(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
         )
 
     return router
