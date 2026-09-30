@@ -1,9 +1,22 @@
 """
 Backward-compatible wrapper routing SQLite queries to SQLiteStorage engine.
+
+DEPRECATED: This module is a legacy shim retained for backward compatibility only.
+All calls default to tenant_id="default" regardless of how PromptManager was configured.
+New code should use manager.storage directly, or the public API functions in llmpivot/__init__.py.
 """
 
+import warnings
 from typing import Optional, List, Dict, Any
 from .storage import SQLiteStorage
+
+warnings.warn(
+    "llmpivot.db is a deprecated backward-compatibility shim. "
+    "It always uses tenant_id='default' regardless of your PromptManager tenant configuration. "
+    "Use manager.storage directly for tenant-aware operations.",
+    DeprecationWarning,
+    stacklevel=2,
+)
 
 _default_storages: Dict[str, SQLiteStorage] = {}
 
@@ -73,7 +86,6 @@ async def insert_log(
 
 
 async def fetch_prompt_id(db_path: str, name: str) -> Optional[int]:
-    # Convenience function used in legacy logger
     prompts = await _get_storage(db_path).fetch_all_prompts()
     for p in prompts:
         if p["name"] == name:

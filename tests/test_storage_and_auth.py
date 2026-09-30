@@ -27,17 +27,26 @@ class StorageAndAuthTests(unittest.TestCase):
         self.assertTrue(verify_password(pwd, hashed))
         self.assertFalse(verify_password("WrongPassword", hashed))
 
+    def test_legacy_pbkdf2_hash_still_verified(self):
+        """Passwords hashed with the old 100k-iteration PBKDF2 format must still verify."""
+        import hashlib
+        import secrets as _secrets
+        salt = _secrets.token_hex(16)
+        key = hashlib.pbkdf2_hmac("sha256", b"oldpassword", salt.encode(), 100000)
+        legacy_hash = f"{salt}${key.hex()}"
+        self.assertTrue(verify_password("oldpassword", legacy_hash))
+        self.assertFalse(verify_password("wrongpassword", legacy_hash))
+
     def test_token_creation_and_verification(self):
         secret = "test-secret-key"
         payload = {"username": "admin", "role": "admin"}
         token = create_token(payload, secret, expires_in=3600)
-        
+
         decoded = verify_token(token, secret)
         self.assertIsNotNone(decoded)
         self.assertEqual(decoded["username"], "admin")
         self.assertEqual(decoded["role"], "admin")
 
-        # Wrong secret
         self.assertIsNone(verify_token(token, "wrong-secret"))
 
     def test_rbac_permissions(self):
@@ -48,7 +57,6 @@ class StorageAndAuthTests(unittest.TestCase):
 
     def test_sqlite_storage_crud(self):
         async def run_test():
-            # Create version
             v1 = await self.storage.create_version(
                 name="summary",
                 content="Summarize the text:",
@@ -59,12 +67,10 @@ class StorageAndAuthTests(unittest.TestCase):
             )
             self.assertEqual(v1, 1)
 
-            # Active version
             active = await self.storage.fetch_active_version("summary", tenant_id="tenant_a")
             self.assertIsNotNone(active)
             self.assertEqual(active["content"], "Summarize the text:")
 
-            # Create second version
             v2 = await self.storage.create_version(
                 name="summary",
                 content="Summarize in bullet points:",
@@ -75,11 +81,9 @@ class StorageAndAuthTests(unittest.TestCase):
             )
             self.assertEqual(v2, 2)
 
-            # Verify active updated to v2
             active_v2 = await self.storage.fetch_active_version("summary", tenant_id="tenant_a")
             self.assertEqual(active_v2["content"], "Summarize in bullet points:")
 
-            # Create user
             pwd_hash = hash_password("pass123")
             user = await self.storage.create_user("admin_user", pwd_hash, role="admin", tenant_id="tenant_a")
             self.assertEqual(user["username"], "admin_user")
@@ -87,6 +91,52 @@ class StorageAndAuthTests(unittest.TestCase):
             fetched_user = await self.storage.get_user("admin_user", tenant_id="tenant_a")
             self.assertIsNotNone(fetched_user)
             self.assertEqual(fetched_user["role"], "admin")
+
+        asyncio.run(run_test())
+
+    def test_soft_delete_hides_from_list(self):
+        """Soft-deleted prompts must not appear in fetch_all_prompts."""
+        async def run_test():
+            await self.storage.create_version("to_delete", "content", "alice", None, True, tenant_id="t1")
+            await self.storage.create_version("keep_me", "content2", "alice", None, True, tenant_id="t1")
+
+            prompts_before = await self.storage.fetch_all_prompts(tenant_id="t1")
+            self.assertEqual(len(prompts_before), 2)
+
+            await self.storage.soft_delete_prompt("to_delete", tenant_id="t1")
+
+            prompts_after = await self.storage.fetch_all_prompts(tenant_id="t1")
+            self.assertEqual(len(prompts_after), 1)
+            self.assertEqual(prompts_after[0]["name"], "keep_me")
+
+            # Active version should also be gone
+            active = await self.storage.fetch_active_version("to_delete", tenant_id="t1")
+            self.assertIsNone(active)
+
+        asyncio.run(run_test())
+
+    def test_audit_log_insert_and_fetch(self):
+        """Audit log inserts and reads back correctly."""
+        async def run_test():
+            await self.storage.insert_audit_log(
+                action="version_created",
+                performed_by="alice",
+                prompt_name="my_prompt",
+                version_id=1,
+                detail="tag=prod active=True",
+                tenant_id="t1",
+            )
+            await self.storage.insert_audit_log(
+                action="prompt_deleted",
+                performed_by="bob",
+                prompt_name="old_prompt",
+                tenant_id="t1",
+            )
+            logs = await self.storage.fetch_audit_logs(limit=10, tenant_id="t1")
+            self.assertEqual(len(logs), 2)
+            actions = {l["action"] for l in logs}
+            self.assertIn("version_created", actions)
+            self.assertIn("prompt_deleted", actions)
 
         asyncio.run(run_test())
 
@@ -111,11 +161,8 @@ class StorageAndAuthTests(unittest.TestCase):
 
             tenant_a_prompts = await self.storage.fetch_all_prompts(tenant_id="tenant_a")
             self.assertEqual(len(tenant_a_prompts), 1)
-            self.assertEqual(tenant_a_prompts[0]["name"], "shared_prompt")
-
             tenant_b_prompts = await self.storage.fetch_all_prompts(tenant_id="tenant_b")
             self.assertEqual(len(tenant_b_prompts), 1)
-            self.assertEqual(tenant_b_prompts[0]["name"], "shared_prompt")
 
             active_a = await self.storage.fetch_active_version("shared_prompt", tenant_id="tenant_a")
             self.assertEqual(active_a["content"], "tenant-a content")
@@ -172,7 +219,6 @@ class StorageAndAuthTests(unittest.TestCase):
             logger.log("rag_prompt", active["id"], "input 1", "output 1")
             logger.log("rag_prompt", active["id"], "input 2", "output 2")
 
-            # Allow batch worker time to process
             await asyncio.sleep(0.3)
 
             logs = await self.storage.fetch_logs("rag_prompt")

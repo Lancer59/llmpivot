@@ -1,6 +1,10 @@
 """
 Server-rendered HTML templates - pure Python strings, no template engine needed.
 All link/form helpers take a `base` prefix (e.g. '/prompts') so paths are always absolute.
+
+CSRF: every state-mutating form now accepts an optional `csrf_token` parameter.
+When present, it is embedded as a hidden input field. The routes layer generates
+and validates the token; templates are just responsible for emitting it.
 """
 
 import difflib
@@ -22,9 +26,15 @@ except ImportError:  # pragma: no cover - supports direct module loading in test
 APP_NAME = "Prompt Manager"
 
 
+def _csrf_field(csrf_token: Optional[str]) -> str:
+    """Render a hidden CSRF input, or empty string when no token is provided."""
+    if not csrf_token:
+        return ""
+    return f'<input type="hidden" name="csrf_token" value="{_escape(csrf_token)}">'
+
+
 def _layout(title: str, body: str, protected: bool = False, base: str = "", user: Optional[dict] = None) -> str:
     badge = '<span class="nav-badge">PROTECTED</span>' if protected else ""
-    
     user_nav = render_user_badge(user, base) if user else ""
 
     return f"""<!DOCTYPE html>
@@ -198,7 +208,15 @@ def prompt_list(prompts: list, protected: bool = False, base: str = "", user: Op
     return _layout("Home", body, protected, base, user)
 
 
-def prompt_detail(name: str, versions: list, protected: bool = False, base: str = "", user: Optional[dict] = None) -> str:
+def prompt_detail(
+    name: str,
+    versions: list,
+    protected: bool = False,
+    base: str = "",
+    user: Optional[dict] = None,
+    csrf_token: Optional[str] = None,
+) -> str:
+    csrf = _csrf_field(csrf_token)
     v_rows = ""
     for v in versions:
         is_act = v.get("is_active")
@@ -213,12 +231,14 @@ def prompt_detail(name: str, versions: list, protected: bool = False, base: str 
             if protected:
                 act_btn = f"""
                 <form method="post" action="{base}/activate/{name}/{v_id}" class="flex" style="display:inline-flex;">
+                  {csrf}
                   <input type="password" name="password" placeholder="Password" style="width:110px;padding:4px 8px;font-size:0.78rem;">
                   <button type="submit" class="btn btn-ghost btn-sm">Make Active</button>
                 </form>"""
             else:
                 act_btn = f"""
                 <form method="post" action="{base}/activate/{name}/{v_id}">
+                  {csrf}
                   <button type="submit" class="btn btn-ghost btn-sm">Make Active</button>
                 </form>"""
 
@@ -271,9 +291,10 @@ def edit_page(
     error: Optional[str] = None,
     is_new: bool = False,
     user: Optional[dict] = None,
+    csrf_token: Optional[str] = None,
 ) -> str:
     err_div = f'<div class="error">{error}</div>' if error else ""
-
+    csrf = _csrf_field(csrf_token)
     action = f"{base}/edit/__new__" if is_new else f"{base}/edit/{name}"
     title_text = "Create New Prompt" if is_new else f"Edit: {name}"
 
@@ -289,7 +310,7 @@ def edit_page(
       <input type="password" id="password" name="password" placeholder="Enter admin password">
     </div>""" if protected else ""
 
-    llm_btn = f"""
+    llm_btn = """
     <button type="button" id="suggest-btn" class="btn btn-ghost btn-sm" style="color:var(--accent);">✨ Get AI Suggestion</button>
     """ if has_llm else ""
 
@@ -320,19 +341,20 @@ def edit_page(
 <h1>{_escape(title_text)}</h1>
 {err_div}
 <form method="post" action="{action}">
+  {csrf}
   {name_input}
   <div class="form-group">
     <div class="flex-between" style="margin-bottom:6px;">
       <label for="content" style="margin:0;">Prompt Content</label>
       {llm_btn}
     </div>
-    <textarea id="content" name="content" rows="12">{content}</textarea>
+    <textarea id="content" name="content" rows="12">{_escape(content)}</textarea>
   </div>
 
   <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;margin-bottom:16px;">
     <div class="form-group">
       <label for="edited_by">Your Name / Team</label>
-      <input type="text" id="edited_by" name="edited_by" value="{user.get('username', '') if user else ''}" placeholder="e.g. alex">
+      <input type="text" id="edited_by" name="edited_by" value="{_escape(user.get('username', '') if user else '')}" placeholder="e.g. alex">
     </div>
     <div class="form-group">
       <label for="tag">Environment Tag</label>
@@ -363,16 +385,27 @@ def edit_page(
     return _layout(title_text, body, protected, base, user)
 
 
-def diff_page(name: str, versions: list, v1: Optional[dict], v2: Optional[dict], protected: bool, base: str, user: Optional[dict] = None) -> str:
+def diff_page(
+    name: str,
+    versions: list,
+    v1: Optional[dict],
+    v2: Optional[dict],
+    protected: bool,
+    base: str,
+    user: Optional[dict] = None,
+) -> str:
     diff_html = ""
     if v1 and v2:
         lines1 = (v1.get("content") or "").splitlines()
         lines2 = (v2.get("content") or "").splitlines()
         diff = list(difflib.unified_diff(lines1, lines2, lterm=""))
         diff_text = "\n".join(diff) or "No differences found."
-        diff_html = f'<div class="card"><pre style="font-family:monospace;font-size:0.88rem;color:#e2e8f0;">{diff_text}</pre></div>'
+        diff_html = f'<div class="card"><pre style="font-family:monospace;font-size:0.88rem;color:#e2e8f0;">{_escape(diff_text)}</pre></div>'
 
-    opts = "".join(f'<option value="{v["id"]}">v{v["version_number"]} ({v.get("created_at") or ""})</option>' for v in versions)
+    opts = "".join(
+        f'<option value="{_escape(str(v["id"]))}">v{v["version_number"]} ({_escape(v.get("created_at") or "")})</option>'
+        for v in versions
+    )
 
     body = f"""
 <h1>Diff Versions: <span style="color:var(--accent);">{_escape(name)}</span></h1>
@@ -391,8 +424,18 @@ def diff_page(name: str, versions: list, v1: Optional[dict], v2: Optional[dict],
     return _layout("Diff", body, protected, base, user)
 
 
-def ab_test_page(name: str, versions: list, protected: bool, has_llm: bool, base: str, user: Optional[dict] = None) -> str:
-    v_opts = "".join(f'<option value="{v["id"]}">v{v["version_number"]} ({v.get("tag") or "no tag"})</option>' for v in versions)
+def ab_test_page(
+    name: str,
+    versions: list,
+    protected: bool,
+    has_llm: bool,
+    base: str,
+    user: Optional[dict] = None,
+) -> str:
+    v_opts = "".join(
+        f'<option value="{_escape(str(v["id"]))}">v{v["version_number"]} ({_escape(v.get("tag") or "no tag")})</option>'
+        for v in versions
+    )
 
     llm_notice = "" if has_llm else '<div class="error" style="margin-bottom:16px;">LLM provider is not configured. Configure <code>llm_url</code> in PromptManager to enable live A/B test runs.</div>'
 
@@ -463,15 +506,21 @@ document.getElementById('run-ab-btn')?.addEventListener('click', async () => {{
     return _layout("A/B Test", body, protected, base, user)
 
 
-def logs_page(logs: list, protected: bool, base: str, prompt_filter: str = "", user: Optional[dict] = None) -> str:
+def logs_page(
+    logs: list,
+    protected: bool,
+    base: str,
+    prompt_filter: str = "",
+    user: Optional[dict] = None,
+) -> str:
     log_rows = ""
     for l in logs:
         log_rows += f"""
         <tr>
-          <td><strong>{_escape(l.get("prompt_name"))}</strong> (v{_escape(l.get("version_number", "-"))})</td>
+          <td><strong>{_escape(l.get("prompt_name"))}</strong> (v{_escape(str(l.get("version_number", "-")))})</td>
           <td><pre style="max-height:50px;overflow:hidden;font-size:0.78rem;">{_escape((l.get("input", "") or "")[:100])}</pre></td>
           <td><pre style="max-height:50px;overflow:hidden;font-size:0.78rem;">{_escape((l.get("output", "") or "")[:100])}</pre></td>
-          <td class="text-muted" style="font-size:0.8rem;">{_escape(l.get("timestamp"))}</td>
+          <td class="text-muted" style="font-size:0.8rem;">{_escape(str(l.get("timestamp") or ""))}</td>
         </tr>"""
 
     if not log_rows:
@@ -483,7 +532,7 @@ def logs_page(logs: list, protected: bool, base: str, prompt_filter: str = "", u
   <table>
     <thead>
       <tr>
-        <th>Prompt & Version</th>
+        <th>Prompt &amp; Version</th>
         <th>Input</th>
         <th>Output</th>
         <th>Timestamp</th>
@@ -496,7 +545,7 @@ def logs_page(logs: list, protected: bool, base: str, prompt_filter: str = "", u
 
 
 def login_page(base: str = "", error: Optional[str] = None) -> str:
-    err_div = f'<div class="error">{error}</div>' if error else ""
+    err_div = f'<div class="error">{_escape(error)}</div>' if error else ""
     body = f"""
 <div style="max-width:380px;margin:60px auto;">
   <div class="card">
@@ -519,9 +568,17 @@ def login_page(base: str = "", error: Optional[str] = None) -> str:
     return _layout("Login", body, False, base, None)
 
 
-def users_page(users: list, current_user: Optional[dict] = None, base: str = "", error: Optional[str] = None, success: Optional[str] = None) -> str:
-    err_div = f'<div class="error">{error}</div>' if error else ""
-    succ_div = f'<div class="success">{success}</div>' if success else ""
+def users_page(
+    users: list,
+    current_user: Optional[dict] = None,
+    base: str = "",
+    error: Optional[str] = None,
+    success: Optional[str] = None,
+    csrf_token: Optional[str] = None,
+) -> str:
+    err_div = f'<div class="error">{_escape(error)}</div>' if error else ""
+    succ_div = f'<div class="success">{_escape(success)}</div>' if success else ""
+    csrf = _csrf_field(csrf_token)
 
     u_rows = ""
     for u in users:
@@ -541,6 +598,7 @@ def users_page(users: list, current_user: Optional[dict] = None, base: str = "",
 <div class="card" style="margin-bottom:24px;">
   <h2>Add New User</h2>
   <form method="post" action="{base}/users" class="mt-16">
+    {csrf}
     <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:12px;">
       <div>
         <label for="username">Username</label>

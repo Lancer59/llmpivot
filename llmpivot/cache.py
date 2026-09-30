@@ -41,10 +41,13 @@ class PromptCache:
             self._task.cancel()
 
     async def _refresh_loop(self) -> None:
-        while True:
-            await asyncio.sleep(self._ttl)
-            for name in list(self._store.keys()):
-                await self._fetch_and_store(name)
+        try:
+            while True:
+                await asyncio.sleep(self._ttl)
+                for name in list(self._store.keys()):
+                    await self._fetch_and_store(name)
+        except asyncio.CancelledError:
+            pass  # clean exit on stop()
 
     async def get(self, name: str) -> Optional[dict]:
         """Return cached entry, refreshing if stale."""

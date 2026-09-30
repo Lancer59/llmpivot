@@ -1,13 +1,22 @@
 """
 Pluggable Storage Layer for llmpivot.
 Supports SQLite (with WAL mode for high concurrency) and MongoDB.
+
+Production changes in this version:
+- is_deleted column on prompts table — soft-deleted prompts are filtered from all list queries.
+- audit_log table — records admin actions (create_version, activate, delete, import, user_create).
+- MongoStorage.get_user accepts tenant_id, matching the BaseStorage interface.
+- insert_logs_batch emits a WARNING when a log entry is dropped (prompt not found in DB).
 """
 
 from abc import ABC, abstractmethod
 import asyncio
+import logging
 import sqlite3
 import time
 from typing import Optional, List, Dict, Any
+
+logger = logging.getLogger("llmpivot.storage")
 
 try:
     import aiosqlite
@@ -19,6 +28,10 @@ try:
 except ImportError:
     AsyncIOMotorClient = None
 
+
+# ---------------------------------------------------------------------------
+# Abstract base
+# ---------------------------------------------------------------------------
 
 class BaseStorage(ABC):
     @abstractmethod
@@ -78,7 +91,7 @@ class BaseStorage(ABC):
         pass
 
     @abstractmethod
-    async def get_user(self, username: str) -> Optional[Dict[str, Any]]:
+    async def get_user(self, username: str, tenant_id: str = "default") -> Optional[Dict[str, Any]]:
         pass
 
     @abstractmethod
@@ -91,22 +104,45 @@ class BaseStorage(ABC):
     async def fetch_users(self, tenant_id: str = "default") -> List[Dict[str, Any]]:
         pass
 
+    # Audit log — optional; default implementation is a no-op so backends that
+    # haven't added it yet don't break.
+    async def insert_audit_log(
+        self,
+        action: str,
+        performed_by: str,
+        prompt_name: Optional[str] = None,
+        version_id: Optional[Any] = None,
+        detail: Optional[str] = None,
+        tenant_id: str = "default",
+    ) -> None:
+        pass
+
+    async def fetch_audit_logs(
+        self, limit: int = 100, tenant_id: str = "default"
+    ) -> List[Dict[str, Any]]:
+        return []
+
+
+# ---------------------------------------------------------------------------
+# SQLite implementation
+# ---------------------------------------------------------------------------
 
 class SQLiteStorage(BaseStorage):
     def __init__(self, db_path: str = "prompts.db"):
         self.db_path = db_path
 
     def init_db_sync(self) -> None:
-        """Synchronous bootstrap - enables WAL mode and creates/updates tables."""
+        """Synchronous bootstrap — enables WAL mode and creates/updates tables."""
         conn = sqlite3.connect(self.db_path)
         conn.execute("PRAGMA journal_mode=WAL;")
         conn.execute("PRAGMA busy_timeout=10000;")
-        
+
         conn.executescript("""
         CREATE TABLE IF NOT EXISTS prompts (
-            id        INTEGER PRIMARY KEY AUTOINCREMENT,
-            name      TEXT NOT NULL,
-            tenant_id TEXT DEFAULT 'default',
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            name       TEXT NOT NULL,
+            tenant_id  TEXT DEFAULT 'default',
+            is_deleted INTEGER DEFAULT 0,
             UNIQUE(tenant_id, name)
         );
 
@@ -142,16 +178,32 @@ class SQLiteStorage(BaseStorage):
             is_active     INTEGER DEFAULT 1,
             created_at    DATETIME DEFAULT CURRENT_TIMESTAMP
         );
+
+        CREATE TABLE IF NOT EXISTS audit_log (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            action       TEXT NOT NULL,
+            performed_by TEXT NOT NULL,
+            prompt_name  TEXT,
+            version_id   TEXT,
+            detail       TEXT,
+            tenant_id    TEXT DEFAULT 'default',
+            created_at   DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
         """)
 
-        # Auto-migration for existing databases missing tenant_id column
-        for table in ["prompts", "prompt_versions", "prompt_logs"]:
-            cur = conn.cursor()
+        # Auto-migrations for existing databases
+        cur = conn.cursor()
+        for table, col, col_def in [
+            ("prompts", "tenant_id", "TEXT DEFAULT 'default'"),
+            ("prompts", "is_deleted", "INTEGER DEFAULT 0"),
+            ("prompt_versions", "tenant_id", "TEXT DEFAULT 'default'"),
+            ("prompt_logs", "tenant_id", "TEXT DEFAULT 'default'"),
+        ]:
             cur.execute(f"PRAGMA table_info({table});")
             cols = [row[1] for row in cur.fetchall()]
-            if "tenant_id" not in cols:
+            if col not in cols:
                 try:
-                    conn.execute(f"ALTER TABLE {table} ADD COLUMN tenant_id TEXT DEFAULT 'default';")
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_def};")
                 except sqlite3.OperationalError:
                     pass
 
@@ -176,6 +228,10 @@ class SQLiteStorage(BaseStorage):
         else:
             return await asyncio.to_thread(self._run_sqlite, func, *args, **kwargs)
 
+    # ------------------------------------------------------------------
+    # Prompts
+    # ------------------------------------------------------------------
+
     async def fetch_active_version(self, name: str, tenant_id: str = "default") -> Optional[Dict[str, Any]]:
         if aiosqlite is not None:
             async with aiosqlite.connect(self.db_path) as db:
@@ -185,7 +241,8 @@ class SQLiteStorage(BaseStorage):
                     SELECT pv.id, pv.content, pv.version_number, pv.tag, pv.created_by, pv.created_at
                     FROM prompt_versions pv
                     JOIN prompts p ON p.id = pv.prompt_id
-                    WHERE p.name = ? AND p.tenant_id = ? AND pv.tenant_id = ? AND pv.is_active = 1
+                    WHERE p.name = ? AND p.tenant_id = ? AND pv.tenant_id = ?
+                      AND pv.is_active = 1 AND p.is_deleted = 0
                     LIMIT 1
                     """,
                     (name, tenant_id, tenant_id),
@@ -200,7 +257,8 @@ class SQLiteStorage(BaseStorage):
                     SELECT pv.id, pv.content, pv.version_number, pv.tag, pv.created_by, pv.created_at
                     FROM prompt_versions pv
                     JOIN prompts p ON p.id = pv.prompt_id
-                    WHERE p.name = ? AND p.tenant_id = ? AND pv.tenant_id = ? AND pv.is_active = 1
+                    WHERE p.name = ? AND p.tenant_id = ? AND pv.tenant_id = ?
+                      AND pv.is_active = 1 AND p.is_deleted = 0
                     LIMIT 1
                     """,
                     (name, tenant_id, tenant_id),
@@ -221,7 +279,7 @@ class SQLiteStorage(BaseStorage):
                 FROM prompts p
                 LEFT JOIN prompt_versions pv
                     ON pv.prompt_id = p.id AND pv.is_active = 1 AND pv.tenant_id = ?
-                WHERE p.tenant_id = ?
+                WHERE p.tenant_id = ? AND p.is_deleted = 0
                 ORDER BY p.name
                 """,
                 (tenant_id, tenant_id),
@@ -271,7 +329,16 @@ class SQLiteStorage(BaseStorage):
     ) -> int:
         def _fn(conn):
             cur = conn.cursor()
-            cur.execute("INSERT OR IGNORE INTO prompts (name, tenant_id) VALUES (?, ?)", (name, tenant_id))
+            # Ensure prompt row exists (restore if previously deleted)
+            cur.execute(
+                "INSERT OR IGNORE INTO prompts (name, tenant_id, is_deleted) VALUES (?, ?, 0)",
+                (name, tenant_id),
+            )
+            # Un-delete if it was soft-deleted
+            cur.execute(
+                "UPDATE prompts SET is_deleted = 0 WHERE name = ? AND tenant_id = ?",
+                (name, tenant_id),
+            )
             cur.execute("SELECT id FROM prompts WHERE name = ? AND tenant_id = ?", (name, tenant_id))
             prompt_id = cur.fetchone()[0]
 
@@ -317,7 +384,6 @@ class SQLiteStorage(BaseStorage):
             if not row:
                 return False
             prompt_id = row[0]
-
             cur.execute("UPDATE prompt_versions SET is_active = 0 WHERE prompt_id = ? AND tenant_id = ?", (prompt_id, tenant_id))
             cur.execute("UPDATE prompt_versions SET is_active = 1 WHERE id = ? AND tenant_id = ?", (v_id, tenant_id))
             return True
@@ -325,20 +391,32 @@ class SQLiteStorage(BaseStorage):
         return await asyncio.to_thread(self._run_sqlite, _fn)
 
     async def soft_delete_prompt(self, name: str, tenant_id: str = "default") -> None:
+        """Mark prompt as deleted and deactivate all versions."""
         def _fn(conn):
             cur = conn.cursor()
-            cur.execute("SELECT id FROM prompts WHERE name = ? AND tenant_id = ?", (name, tenant_id))
+            cur.execute(
+                "SELECT id FROM prompts WHERE name = ? AND tenant_id = ?",
+                (name, tenant_id),
+            )
             row = cur.fetchone()
             if row:
-                cur.execute("UPDATE prompt_versions SET is_active = 0 WHERE prompt_id = ?", (row[0],))
+                prompt_id = row[0]
+                cur.execute("UPDATE prompt_versions SET is_active = 0 WHERE prompt_id = ?", (prompt_id,))
+                cur.execute("UPDATE prompts SET is_deleted = 1 WHERE id = ?", (prompt_id,))
 
         await asyncio.to_thread(self._run_sqlite, _fn)
+
+    # ------------------------------------------------------------------
+    # Usage logs
+    # ------------------------------------------------------------------
 
     async def insert_logs_batch(self, logs: List[Dict[str, Any]]) -> None:
         if not logs:
             return
+
         def _fn(conn):
             cur = conn.cursor()
+            dropped = 0
             for log in logs:
                 prompt_name = log.get("prompt_name")
                 tenant_id = log.get("tenant_id", "default")
@@ -346,23 +424,39 @@ class SQLiteStorage(BaseStorage):
                 input_text = log.get("input_text", "")
                 output_text = log.get("output_text", "")
 
+                # Truncate oversized fields to avoid unbounded storage growth
+                input_text = (input_text or "")[:10_000]
+                output_text = (output_text or "")[:10_000]
+
                 cur.execute(
                     "SELECT id FROM prompts WHERE name = ? AND tenant_id = ?",
                     (prompt_name, tenant_id),
                 )
                 row = cur.fetchone()
-                if row:
-                    prompt_id = row[0]
-                    try:
-                        v_id = int(version_id)
-                    except (ValueError, TypeError):
-                        v_id = 0
-                    cur.execute(
-                        "INSERT INTO prompt_logs (prompt_id, version_id, tenant_id, input, output) VALUES (?, ?, ?, ?, ?)",
-                        (prompt_id, v_id, tenant_id, input_text, output_text),
-                    )
+                if not row:
+                    dropped += 1
+                    continue
 
-        await asyncio.to_thread(self._run_sqlite, _fn)
+                prompt_id = row[0]
+                try:
+                    v_id = int(version_id)
+                except (ValueError, TypeError):
+                    v_id = 0
+                cur.execute(
+                    "INSERT INTO prompt_logs (prompt_id, version_id, tenant_id, input, output) VALUES (?, ?, ?, ?, ?)",
+                    (prompt_id, v_id, tenant_id, input_text, output_text),
+                )
+            return dropped
+
+        dropped = await asyncio.to_thread(self._run_sqlite, _fn)
+        if dropped:
+            logger.warning(
+                "insert_logs_batch: %d log entr%s dropped because the prompt name was not found "
+                "in the database. Check that tenant_id and prompt_name match what was used when "
+                "the prompt was created.",
+                dropped,
+                "y was" if dropped == 1 else "ies were",
+            )
 
     async def fetch_logs(self, prompt_name: Optional[str] = None, limit: int = 100, tenant_id: str = "default") -> List[Dict[str, Any]]:
         def _fn(conn):
@@ -398,6 +492,10 @@ class SQLiteStorage(BaseStorage):
 
         return await asyncio.to_thread(self._run_sqlite, _fn)
 
+    # ------------------------------------------------------------------
+    # Export / Import
+    # ------------------------------------------------------------------
+
     async def export_prompts(self, tenant_id: str = "default") -> Dict[str, str]:
         def _fn(conn):
             cur = conn.cursor()
@@ -407,6 +505,7 @@ class SQLiteStorage(BaseStorage):
                 FROM prompt_versions pv
                 JOIN prompts p ON p.id = pv.prompt_id
                 WHERE pv.is_active = 1 AND p.tenant_id = ? AND pv.tenant_id = ?
+                  AND p.is_deleted = 0
                 ORDER BY p.name
                 """,
                 (tenant_id, tenant_id),
@@ -419,9 +518,9 @@ class SQLiteStorage(BaseStorage):
     async def import_prompts(self, data: Dict[str, str], imported_by: str = "import", tenant_id: str = "default") -> Dict[str, List[str]]:
         created, updated = [], []
         for name, content in data.items():
-            def _check(conn):
+            def _check(conn, _name=name):
                 cur = conn.cursor()
-                cur.execute("SELECT id FROM prompts WHERE name = ? AND tenant_id = ?", (name, tenant_id))
+                cur.execute("SELECT id FROM prompts WHERE name = ? AND tenant_id = ?", (_name, tenant_id))
                 return cur.fetchone() is not None
 
             exists = await asyncio.to_thread(self._run_sqlite, _check)
@@ -431,6 +530,10 @@ class SQLiteStorage(BaseStorage):
             else:
                 created.append(name)
         return {"created": created, "updated": updated}
+
+    # ------------------------------------------------------------------
+    # Users
+    # ------------------------------------------------------------------
 
     async def get_user(self, username: str, tenant_id: str = "default") -> Optional[Dict[str, Any]]:
         def _fn(conn):
@@ -447,7 +550,10 @@ class SQLiteStorage(BaseStorage):
         def _fn(conn):
             cur = conn.cursor()
             cur.execute(
-                "INSERT INTO users (username, email, password_hash, role, tenant_id) VALUES (?, ?, ?, ?, ?)",
+                """
+                INSERT INTO users (username, email, password_hash, role, tenant_id)
+                VALUES (?, ?, ?, ?, ?)
+                """,
                 (username, email, password_hash, role, tenant_id),
             )
 
@@ -466,25 +572,73 @@ class SQLiteStorage(BaseStorage):
 
         return await asyncio.to_thread(self._run_sqlite, _fn)
 
+    # ------------------------------------------------------------------
+    # Audit log
+    # ------------------------------------------------------------------
+
+    async def insert_audit_log(
+        self,
+        action: str,
+        performed_by: str,
+        prompt_name: Optional[str] = None,
+        version_id: Optional[Any] = None,
+        detail: Optional[str] = None,
+        tenant_id: str = "default",
+    ) -> None:
+        def _fn(conn):
+            conn.execute(
+                """
+                INSERT INTO audit_log (action, performed_by, prompt_name, version_id, detail, tenant_id)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (action, performed_by, prompt_name, str(version_id) if version_id is not None else None, detail, tenant_id),
+            )
+        try:
+            await asyncio.to_thread(self._run_sqlite, _fn)
+        except Exception as exc:
+            logger.warning("Failed to write audit log: %s", exc)
+
+    async def fetch_audit_logs(self, limit: int = 100, tenant_id: str = "default") -> List[Dict[str, Any]]:
+        def _fn(conn):
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT id, action, performed_by, prompt_name, version_id, detail, tenant_id, created_at
+                FROM audit_log WHERE tenant_id = ?
+                ORDER BY created_at DESC LIMIT ?
+                """,
+                (tenant_id, limit),
+            )
+            return [dict(r) for r in cur.fetchall()]
+        return await asyncio.to_thread(self._run_sqlite, _fn)
+
+    # ------------------------------------------------------------------
+    # Tenant migration helper
+    # ------------------------------------------------------------------
+
     async def migrate_missing_tenant_ids(self, tenant_id: str = "default") -> Dict[str, int]:
         def _fn(conn):
             cur = conn.cursor()
-            prompts_updated = cur.execute(
+            p = cur.execute(
                 "UPDATE prompts SET tenant_id = ? WHERE tenant_id IS NULL OR tenant_id = ''",
                 (tenant_id,),
             ).rowcount
-            versions_updated = cur.execute(
+            pv = cur.execute(
                 "UPDATE prompt_versions SET tenant_id = ? WHERE tenant_id IS NULL OR tenant_id = ''",
                 (tenant_id,),
             ).rowcount
-            users_updated = cur.execute(
+            u = cur.execute(
                 "UPDATE users SET tenant_id = ? WHERE tenant_id IS NULL OR tenant_id = ''",
                 (tenant_id,),
             ).rowcount
-            return {"prompts": prompts_updated, "prompt_versions": versions_updated, "users": users_updated}
+            return {"prompts": p, "prompt_versions": pv, "users": u}
 
         return await asyncio.to_thread(self._run_sqlite, _fn)
 
+
+# ---------------------------------------------------------------------------
+# MongoDB implementation
+# ---------------------------------------------------------------------------
 
 class MongoStorage(BaseStorage):
     def __init__(self, mongo_uri: str = "mongodb://localhost:27017", db_name: str = "llmpivot"):
@@ -497,6 +651,7 @@ class MongoStorage(BaseStorage):
         self.db = self.client[db_name]
 
     def init_db_sync(self) -> None:
+        """No-op for Mongo; indexes are created lazily or via a separate migration."""
         pass
 
     async def fetch_active_version(self, name: str, tenant_id: str = "default") -> Optional[Dict[str, Any]]:
@@ -515,11 +670,15 @@ class MongoStorage(BaseStorage):
         }
 
     async def fetch_all_prompts(self, tenant_id: str = "default") -> List[Dict[str, Any]]:
-        prompts = await self.db.prompts.find({"tenant_id": tenant_id}).to_list(length=1000)
+        prompts = await self.db.prompts.find(
+            {"tenant_id": tenant_id, "is_deleted": {"$ne": True}}
+        ).to_list(length=1000)
         results = []
         for p in prompts:
             name = p["name"]
-            active = await self.db.prompt_versions.find_one({"prompt_name": name, "tenant_id": tenant_id, "is_active": True})
+            active = await self.db.prompt_versions.find_one(
+                {"prompt_name": name, "tenant_id": tenant_id, "is_active": True}
+            )
             results.append({
                 "id": str(p["_id"]),
                 "name": name,
@@ -530,7 +689,9 @@ class MongoStorage(BaseStorage):
         return sorted(results, key=lambda x: x["name"])
 
     async def fetch_prompt_versions(self, name: str, tenant_id: str = "default") -> List[Dict[str, Any]]:
-        cursor = self.db.prompt_versions.find({"prompt_name": name, "tenant_id": tenant_id}).sort("version_number", -1)
+        cursor = self.db.prompt_versions.find(
+            {"prompt_name": name, "tenant_id": tenant_id}
+        ).sort("version_number", -1)
         docs = await cursor.to_list(length=1000)
         return [
             {
@@ -576,8 +737,13 @@ class MongoStorage(BaseStorage):
     ) -> int:
         await self.db.prompts.update_one(
             {"name": name, "tenant_id": tenant_id},
-            {"$setOnInsert": {"name": name, "tenant_id": tenant_id, "created_at": time.strftime("%Y-%m-%d %H:%M:%S")}},
+            {"$setOnInsert": {"name": name, "tenant_id": tenant_id, "is_deleted": False, "created_at": time.strftime("%Y-%m-%d %H:%M:%S")}},
             upsert=True,
+        )
+        # Restore if previously deleted
+        await self.db.prompts.update_one(
+            {"name": name, "tenant_id": tenant_id},
+            {"$set": {"is_deleted": False}},
         )
 
         last_v = await self.db.prompt_versions.find_one(
@@ -598,7 +764,7 @@ class MongoStorage(BaseStorage):
                 {"$set": {"is_active": False}},
             )
 
-        version_doc = {
+        await self.db.prompt_versions.insert_one({
             "prompt_name": name,
             "tenant_id": tenant_id,
             "content": content,
@@ -607,8 +773,7 @@ class MongoStorage(BaseStorage):
             "tag": tag,
             "is_active": bool(set_active),
             "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-        }
-        await self.db.prompt_versions.insert_one(version_doc)
+        })
         return next_v
 
     async def set_active_version(self, version_id: Any, tenant_id: str = "default") -> bool:
@@ -622,21 +787,21 @@ class MongoStorage(BaseStorage):
             return False
         name = doc["prompt_name"]
         t_id = doc.get("tenant_id", tenant_id)
-
         await self.db.prompt_versions.update_many(
             {"prompt_name": name, "tenant_id": t_id},
             {"$set": {"is_active": False}},
         )
-        await self.db.prompt_versions.update_one(
-            {"_id": oid},
-            {"$set": {"is_active": True}},
-        )
+        await self.db.prompt_versions.update_one({"_id": oid}, {"$set": {"is_active": True}})
         return True
 
     async def soft_delete_prompt(self, name: str, tenant_id: str = "default") -> None:
         await self.db.prompt_versions.update_many(
             {"prompt_name": name, "tenant_id": tenant_id},
             {"$set": {"is_active": False}},
+        )
+        await self.db.prompts.update_one(
+            {"name": name, "tenant_id": tenant_id},
+            {"$set": {"is_deleted": True}},
         )
 
     async def insert_logs_batch(self, logs: List[Dict[str, Any]]) -> None:
@@ -648,8 +813,8 @@ class MongoStorage(BaseStorage):
                 "prompt_name": log.get("prompt_name"),
                 "version_id": str(log.get("version_id")),
                 "tenant_id": log.get("tenant_id", "default"),
-                "input": log.get("input_text", ""),
-                "output": log.get("output_text", ""),
+                "input": (log.get("input_text", "") or "")[:10_000],
+                "output": (log.get("output_text", "") or "")[:10_000],
                 "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
             })
         await self.db.prompt_logs.insert_many(docs)
@@ -688,8 +853,12 @@ class MongoStorage(BaseStorage):
                 created.append(name)
         return {"created": created, "updated": updated}
 
-    async def get_user(self, username: str) -> Optional[Dict[str, Any]]:
-        doc = await self.db.users.find_one({"username": username})
+    # ------------------------------------------------------------------
+    # Users — tenant_id param now present to match BaseStorage interface
+    # ------------------------------------------------------------------
+
+    async def get_user(self, username: str, tenant_id: str = "default") -> Optional[Dict[str, Any]]:
+        doc = await self.db.users.find_one({"username": username, "tenant_id": tenant_id})
         if not doc:
             return None
         doc["id"] = str(doc["_id"])
@@ -712,7 +881,7 @@ class MongoStorage(BaseStorage):
         return user_doc
 
     async def fetch_users(self, tenant_id: str = "default") -> List[Dict[str, Any]]:
-        docs = await self.db.users.find().to_list(length=1000)
+        docs = await self.db.users.find({"tenant_id": tenant_id}).to_list(length=1000)
         return [
             {
                 "id": str(d["_id"]),
@@ -721,6 +890,45 @@ class MongoStorage(BaseStorage):
                 "role": d.get("role"),
                 "tenant_id": d.get("tenant_id"),
                 "is_active": d.get("is_active", True),
+                "created_at": d.get("created_at"),
+            }
+            for d in docs
+        ]
+
+    async def insert_audit_log(
+        self,
+        action: str,
+        performed_by: str,
+        prompt_name: Optional[str] = None,
+        version_id: Optional[Any] = None,
+        detail: Optional[str] = None,
+        tenant_id: str = "default",
+    ) -> None:
+        try:
+            await self.db.audit_log.insert_one({
+                "action": action,
+                "performed_by": performed_by,
+                "prompt_name": prompt_name,
+                "version_id": str(version_id) if version_id is not None else None,
+                "detail": detail,
+                "tenant_id": tenant_id,
+                "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            })
+        except Exception as exc:
+            logger.warning("Failed to write audit log: %s", exc)
+
+    async def fetch_audit_logs(self, limit: int = 100, tenant_id: str = "default") -> List[Dict[str, Any]]:
+        cursor = self.db.audit_log.find({"tenant_id": tenant_id}).sort("created_at", -1).limit(limit)
+        docs = await cursor.to_list(length=limit)
+        return [
+            {
+                "id": str(d["_id"]),
+                "action": d.get("action"),
+                "performed_by": d.get("performed_by"),
+                "prompt_name": d.get("prompt_name"),
+                "version_id": d.get("version_id"),
+                "detail": d.get("detail"),
+                "tenant_id": d.get("tenant_id"),
                 "created_at": d.get("created_at"),
             }
             for d in docs
