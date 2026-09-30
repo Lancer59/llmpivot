@@ -47,93 +47,132 @@ def _layout(title: str, body: str, protected: bool = False, base: str = "", user
   *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
   :root {{
     color-scheme: dark;
-    --bg: #0f1117;
-    --surface: #191d27;
-    --surface-strong: #202636;
-    --line: #30364a;
-    --line-soft: #242a3a;
-    --text: #edf2f7;
-    --muted: #98a2b3;
-    --muted-strong: #c4ccd8;
-    --accent: #8fb3ff;
-    --accent-strong: #a7f3d0;
-    --danger-bg: #742a2a;
-    --danger-text: #feb2b2;
+    --bg: #0b1020;
+    --surface: #111a2b;
+    --surface-raised: #162237;
+    --surface-soft: #0e1728;
+    --line: #29374d;
+    --line-soft: rgba(150, 175, 207, .12);
+    --text: #edf4fc;
+    --muted: #8fa1b8;
+    --muted-strong: #becbdd;
+    --accent: #91c8ff;
+    --accent-strong: #c1e4ff;
+    --accent-ink: #091522;
+    --success: #82d6b2;
+    --danger-bg: #351d2a;
+    --danger-text: #ffb4c2;
+    --warning: #f2cd8f;
+    --radius: 12px;
+    --shadow: 0 24px 70px rgba(0, 0, 0, .24);
   }}
+  html {{ background: var(--bg); scroll-behavior: smooth; }}
   body {{
     font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    background: linear-gradient(180deg, #151925 0%, var(--bg) 34%, #11131a 100%);
+    background: radial-gradient(ellipse at 50% -24%, rgba(61, 105, 158, .22), transparent 54%), var(--bg);
     color: var(--text);
     min-height: 100vh;
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
   }}
-  a {{ color: var(--accent); text-decoration: none; }}
-  a:hover {{ text-decoration: underline; }}
+  a {{ color: var(--accent); text-decoration: none; transition: color .16s ease, background .16s ease, border-color .16s ease; }}
+  a:hover {{ color: var(--accent-strong); }}
+  ::selection {{ background: rgba(120, 190, 255, .28); color: #fff; }}
   .nav {{
-    background: rgba(18, 22, 32, 0.92);
-    border-bottom: 1px solid var(--line-soft);
-    backdrop-filter: blur(14px);
+    background: rgba(11, 16, 32, .84);
+    border-bottom: 1px solid rgba(150, 175, 207, .13);
+    backdrop-filter: blur(18px) saturate(140%);
     position: sticky;
     top: 0;
     z-index: 10;
   }}
   .nav-inner {{
-    max-width: 1080px;
+    max-width: 1200px;
+    min-height: 68px;
     margin: 0 auto;
-    padding: 14px 24px;
+    padding: 10px 30px;
     display: flex;
     align-items: center;
-    gap: 18px;
+    gap: 14px;
   }}
   .nav-brand {{
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
     font-weight: 760;
-    font-size: 1.04rem;
-    color: #fff;
+    letter-spacing: -.035em;
+    font-size: 1.02rem;
+    color: var(--text);
     white-space: nowrap;
   }}
-  .nav-links {{ margin-left: auto; display: flex; align-items: center; gap: 6px; }}
+  .nav-brand::before {{ content: ""; width: 10px; height: 10px; border-radius: 3px; background: linear-gradient(145deg, #b5e3ff, #6caeff); box-shadow: 0 0 18px rgba(109, 176, 255, .5); transform: rotate(-8deg); }}
+  .nav-links {{ margin-left: auto; display: flex; align-items: center; gap: 4px; }}
   .nav-link {{
-    color: var(--muted-strong);
-    font-size: 0.9rem;
-    font-weight: 600;
-    padding: 7px 11px;
-    border-radius: 7px;
+    color: #9fb0c6;
+    font-size: .84rem;
+    font-weight: 580;
+    padding: 8px 11px;
+    border-radius: 8px;
   }}
-  .nav-link:hover {{ background: var(--surface-strong); color: #fff; text-decoration: none; }}
-  .nav-badge {{ font-size: 0.72rem; background: #4c2f12; color: #fbd38d; padding: 3px 8px; border-radius: 99px; font-weight: 700; }}
-  .container {{ max-width: 1080px; margin: 0 auto; padding: 34px 24px; }}
-  h1 {{ font-size: 1.55rem; font-weight: 750; margin-bottom: 24px; }}
-  h2 {{ font-size: 1.02rem; font-weight: 700; margin-bottom: 12px; color: var(--muted-strong); }}
-  .card {{ background: rgba(25, 29, 39, 0.96); border: 1px solid var(--line-soft); border-radius: 8px; padding: 20px; margin-bottom: 16px; box-shadow: 0 18px 45px rgba(0, 0, 0, 0.18); }}
-  table {{ width: 100%; border-collapse: collapse; font-size: 0.9rem; }}
-  th {{ text-align: left; padding: 11px 14px; color: var(--muted); border-bottom: 1px solid var(--line); font-weight: 650; }}
-  td {{ padding: 11px 14px; border-bottom: 1px solid #202635; vertical-align: middle; }}
+  .nav-link:hover {{ background: rgba(142, 190, 246, .09); color: var(--text); text-decoration: none; }}
+  .nav-badge {{ font-size: .65rem; letter-spacing: .08em; background: rgba(239, 185, 105, .12); border: 1px solid rgba(239, 185, 105, .22); color: var(--warning); padding: 4px 8px; border-radius: 99px; font-weight: 750; }}
+  .user-nav {{ display: flex; align-items: center; gap: 8px; margin-left: 9px; padding-left: 12px; border-left: 1px solid var(--line); }}
+  .user-avatar {{ display: inline-grid; place-items: center; width: 27px; height: 27px; border-radius: 8px; background: rgba(145, 200, 255, .12); color: var(--accent-strong); font-size: .73rem; font-weight: 750; }}
+  .user-name {{ color: #dce7f4; font-size: .8rem; font-weight: 620; }}
+  .user-nav .nav-link {{ padding: 7px 8px; }}
+  .container {{ max-width: 1200px; margin: 0 auto; padding: 44px 30px 72px; }}
+  h1 {{ font-size: clamp(1.55rem, 2.5vw, 2rem); line-height: 1.2; letter-spacing: -.045em; font-weight: 720; margin-bottom: 10px; }}
+  h2 {{ font-size: 1rem; line-height: 1.35; font-weight: 680; margin-bottom: 12px; color: #dae5f2; letter-spacing: -.015em; }}
+  p {{ color: var(--muted-strong); }}
+  .card {{ background: linear-gradient(145deg, rgba(19, 30, 48, .96), rgba(15, 25, 41, .96)); border: 1px solid var(--line-soft); border-radius: var(--radius); padding: 22px; margin-bottom: 18px; box-shadow: var(--shadow); }}
+  table {{ width: 100%; min-width: 680px; border-collapse: collapse; font-size: .86rem; }}
+  th {{ text-align: left; padding: 13px 16px; color: #8fa2bb; background: rgba(7, 13, 25, .38); border-bottom: 1px solid var(--line); font-size: .7rem; letter-spacing: .09em; text-transform: uppercase; font-weight: 720; white-space: nowrap; }}
+  td {{ padding: 14px 16px; border-bottom: 1px solid rgba(150, 175, 207, .085); vertical-align: middle; color: #d2deec; }}
   tbody tr {{ transition: background .14s ease; }}
-  tbody tr:hover {{ background: rgba(255, 255, 255, 0.025); }}
+  tbody tr:hover {{ background: rgba(145, 200, 255, .045); }}
   tr:last-child td {{ border-bottom: none; }}
-  .badge {{ display: inline-block; font-size: 0.7rem; padding: 2px 8px; border-radius: 99px; font-weight: 600; }}
-  .badge-prod {{ background: #276749; color: #9ae6b4; }}
-  .badge-staging {{ background: #744210; color: #fbd38d; }}
-  .badge-experiment {{ background: #44337a; color: #d6bcfa; }}
-  .badge-active {{ background: #2a4365; color: #90cdf4; }}
-  .btn {{ display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 34px; padding: 7px 15px; border-radius: 7px; font-size: 0.85rem; font-weight: 700; cursor: pointer; border: 1px solid transparent; transition: background .15s, border-color .15s, transform .15s; }}
+  .badge {{ display: inline-flex; align-items: center; font-size: .66rem; letter-spacing: .045em; text-transform: uppercase; padding: 4px 9px; border-radius: 99px; font-weight: 720; border: 1px solid transparent; white-space: nowrap; }}
+  .badge-prod {{ background: rgba(78, 190, 137, .12); border-color: rgba(78, 190, 137, .22); color: #91e0b8; }}
+  .badge-staging {{ background: rgba(229, 176, 82, .12); border-color: rgba(229, 176, 82, .22); color: #f2cb82; }}
+  .badge-experiment {{ background: rgba(174, 144, 255, .12); border-color: rgba(174, 144, 255, .22); color: #c9b4ff; }}
+  .badge-active {{ background: rgba(106, 177, 247, .12); border-color: rgba(106, 177, 247, .2); color: #a6d5ff; }}
+  .btn {{ display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 38px; padding: 8px 14px; border-radius: 9px; font: inherit; font-size: .83rem; line-height: 1.2; font-weight: 660; cursor: pointer; border: 1px solid transparent; transition: background .15s, border-color .15s, transform .15s, box-shadow .15s; white-space: nowrap; }}
   .btn:hover {{ transform: translateY(-1px); text-decoration: none; }}
-  .btn-primary {{ background: var(--accent); color: #0f1117; }}
-  .btn-primary:hover {{ background: #a3c2ff; }}
-  .btn-ghost {{ background: transparent; color: var(--muted-strong); border-color: var(--line); }}
-  .btn-ghost:hover {{ background: var(--surface-strong); color: #fff; border-color: var(--line-soft); }}
-  .btn-danger {{ background: var(--danger-bg); color: var(--danger-text); border-color: #9b2c2c; }}
-  .btn-danger:hover {{ background: #9b2c2c; }}
-  .btn-sm {{ min-height: 28px; padding: 4px 10px; font-size: 0.78rem; }}
+  .btn-primary {{ background: linear-gradient(180deg, #a9d9ff, #85c2f6); color: var(--accent-ink); box-shadow: 0 5px 18px rgba(90, 163, 229, .14); }}
+  .btn-primary:hover {{ background: #c0e4ff; color: #081421; box-shadow: 0 7px 22px rgba(90, 163, 229, .22); }}
+  .btn-ghost {{ background: rgba(161, 187, 220, .035); color: #c0cede; border-color: rgba(150, 175, 207, .2); }}
+  .btn-ghost:hover {{ background: rgba(145, 200, 255, .09); color: #f2f8ff; border-color: rgba(145, 200, 255, .32); }}
+  .btn-danger {{ background: var(--danger-bg); color: var(--danger-text); border-color: rgba(255, 124, 151, .24); }}
+  .btn-danger:hover {{ background: #512536; }}
+  .btn:disabled {{ opacity: .48; cursor: not-allowed; transform: none; box-shadow: none; }}
+  .btn-sm {{ min-height: 31px; padding: 6px 10px; font-size: .76rem; }}
   .flex {{ display: flex; align-items: center; gap: 10px; }}
-  .flex-between {{ display: flex; align-items: center; justify-content: space-between; gap: 12px; }}
+  .flex-between {{ display: flex; align-items: center; justify-content: space-between; gap: 16px; }}
   .mt-16 {{ margin-top: 16px; }}
-  .error {{ background: var(--danger-bg); color: var(--danger-text); border: 1px solid #9b2c2c; padding: 10px 14px; border-radius: 7px; margin-bottom: 16px; font-size: 0.88rem; }}
-  .success {{ background: #276749; color: #9ae6b4; border: 1px solid #2f855a; padding: 10px 14px; border-radius: 7px; margin-bottom: 16px; font-size: 0.88rem; }}
+  .error {{ background: rgba(125, 43, 66, .2); color: var(--danger-text); border: 1px solid rgba(255, 124, 151, .25); padding: 12px 15px; border-radius: 9px; margin-bottom: 18px; font-size: .86rem; }}
+  .success {{ background: rgba(39, 121, 85, .16); color: #9be4bf; border: 1px solid rgba(93, 202, 145, .23); padding: 12px 15px; border-radius: 9px; margin-bottom: 18px; font-size: .86rem; }}
   .text-muted {{ color: var(--muted); }}
-  textarea, input[type="text"], input[type="password"], input[type="email"], select {{ background: #11141f; border: 1px solid var(--line); color: var(--text); border-radius: 7px; padding: 9px 12px; font-size: 0.9rem; width: 100%; }}
-  textarea:focus, input:focus, select:focus {{ outline: none; border-color: var(--accent); }}
-  label {{ display: block; font-size: 0.82rem; font-weight: 650; color: var(--muted-strong); margin-bottom: 6px; }}
-  .form-group {{ margin-bottom: 16px; }}
+  textarea, input[type="text"], input[type="password"], input[type="email"], select {{ background: #0b1423; border: 1px solid rgba(150, 175, 207, .22); color: var(--text); border-radius: 9px; padding: 10px 12px; font: inherit; font-size: .88rem; width: 100%; transition: border-color .15s, box-shadow .15s, background .15s; }}
+  textarea {{ min-height: 120px; resize: vertical; line-height: 1.6; }}
+  textarea:focus, input:focus, select:focus {{ outline: none; border-color: #78baf2; background: #0d192a; box-shadow: 0 0 0 3px rgba(120, 186, 242, .13); }}
+  textarea::placeholder, input::placeholder {{ color: #61748d; }}
+  label {{ display: block; font-size: .77rem; font-weight: 660; color: #c1cede; margin-bottom: 7px; }}
+  .form-group {{ margin-bottom: 18px; }}
+  pre, code {{ font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }}
+  pre {{ white-space: pre-wrap; overflow-wrap: anywhere; }}
+  :focus-visible {{ outline: 2px solid #8dcaff; outline-offset: 3px; }}
+  @media (max-width: 760px) {{
+    .nav-inner {{ padding: 10px 18px; align-items: flex-start; flex-wrap: wrap; }}
+    .nav-links {{ width: 100%; margin: 0; overflow-x: auto; padding-bottom: 2px; }}
+    .nav-link {{ flex: 0 0 auto; }}
+    .container {{ padding: 30px 18px 52px; }}
+    .flex-between {{ align-items: flex-start; flex-direction: column; }}
+    .flex-between > .flex {{ flex-wrap: wrap; }}
+    .card {{ padding: 17px; }}
+    [style*="grid-template-columns"] {{ grid-template-columns: 1fr !important; }}
+    [style*="overflow:hidden"] {{ overflow-x: auto !important; }}
+  }}
+  @media (prefers-reduced-motion: reduce) {{ *, *::before, *::after {{ scroll-behavior: auto !important; transition-duration: .01ms !important; }} }}
 </style>
 </head>
 <body>

@@ -1,72 +1,135 @@
 """
-Production-ready example — shows how to wire llmpivot into a FastAPI app.
+llmpivot — production-ready example app.
 
-Run with: uvicorn example_app:app --reload
-Then visit: http://localhost:8000/prompts/list
+Run locally:
+    uvicorn example_app:app --reload
 
-Production notes demonstrated here:
-- secret_key must be set explicitly when auth_mode="rbac"; use secrets.token_hex(32).
-- cookie_secure=True (default) ensures the session cookie is HTTPS-only.
-- A global exception handler converts PromptNotFoundError to a clean 404 JSON response.
-- log_prompt_usage logs the exact version that served the request for accurate tracking.
+Then open: http://localhost:8000/prompts/list
+Login with: admin / changeme  (change the password immediately after first login)
+
+Environment variables:
+    LLMPIVOT_SECRET   — HMAC signing key for session cookies (required in production)
+    LLMPIVOT_DB       — path to the SQLite database file (default: prompts.db)
+    LLMPIVOT_PASSWORD — initial admin bootstrap password (default: changeme)
 """
 
+import os
 import secrets
+
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
-from llmpivot import PromptManager, PromptNotFoundError, aget_prompt_with_meta, log_prompt_usage
+
+from llmpivot import (
+    PromptManager,
+    PromptNotFoundError,
+    aget_prompt_with_meta,
+    log_prompt_usage,
+)
 
 # ---------------------------------------------------------------------------
-# 1. Initialize once at startup
-#    - Replace the secret_key with a real random value (e.g. from an env var).
-#    - Set cookie_secure=False only during local HTTP development.
+# Configuration — load from environment in production, sensible defaults for dev
+# ---------------------------------------------------------------------------
+
+# secret_key signs all session cookies. A new random value is generated each
+# run when the env var is not set — fine for dev, but means sessions are
+# invalidated on every restart. Set LLMPIVOT_SECRET in production.
+#   python -c "import secrets; print(secrets.token_hex(32))"
+SECRET_KEY = os.environ.get("LLMPIVOT_SECRET", secrets.token_hex(32))
+
+DB_PATH = os.environ.get("LLMPIVOT_DB", "prompts.db")
+BOOTSTRAP_PASSWORD = os.environ.get("LLMPIVOT_PASSWORD", "changeme")
+
+# ---------------------------------------------------------------------------
+# 1. Initialize PromptManager — do this exactly once at module level
 # ---------------------------------------------------------------------------
 manager = PromptManager(
-    db_path="prompts.db",
-    cache_ttl=5,
-    auth_mode="rbac",
-    secret_key=secrets.token_hex(32),   # In production: load from env/secrets manager
-    cookie_secure=False,                # Set True (default) in production behind HTTPS
+    # --- storage ---
+    db_path=DB_PATH,
+    cache_ttl=5,            # seconds before a cached prompt is re-fetched from DB
+
+    # --- auth ---
+    auth_mode="rbac",       # "disabled" | "protected" | "rbac"
+    secret_key=SECRET_KEY,
+    cookie_secure=False,    # True in production (requires HTTPS)
+
+    # --- first-run admin bootstrap ---
     bootstrap_admin=True,
-    bootstrap_password="changeme",      # Change immediately after first login
-    # Optional LLM for AI suggestions + A/B testing:
+    bootstrap_password=BOOTSTRAP_PASSWORD,
+
+    # --- tenancy ---
+    tenant_id="default",    # change per org/workspace in multi-tenant deployments
+
+    # --- usage logging ---
+    log_sample_rate=1.0,    # 1.0 = log every call; 0.1 = log 10% (reduce DB writes)
+
+    # --- optional LLM for AI suggestions + A/B testing ---
     # llm_url="https://api.openai.com/v1/chat/completions",
-    # llm_api_key="sk-...",
+    # llm_api_key=os.environ.get("OPENAI_API_KEY", ""),
     # llm_model="gpt-4o",
 )
 
-app = FastAPI()
+# ---------------------------------------------------------------------------
+# 2. Create the FastAPI app
+# ---------------------------------------------------------------------------
+app = FastAPI(
+    title="My LLM App",
+    description="Powered by llmpivot for runtime prompt management.",
+)
 
 # ---------------------------------------------------------------------------
-# 2. Global handler: PromptNotFoundError → clean 404 (not an unhandled 500)
-#    Register this BEFORE mounting the sub-app so it applies to all routes.
+# 3. Register the PromptNotFoundError handler BEFORE mounting the sub-app.
+#    Without this, a missing prompt raises an unhandled 500. With it: clean 404.
 # ---------------------------------------------------------------------------
 @app.exception_handler(PromptNotFoundError)
-async def prompt_not_found_handler(request: Request, exc: PromptNotFoundError):
+async def _prompt_not_found(request: Request, exc: PromptNotFoundError):
     return JSONResponse(
         status_code=404,
         content={"error": "prompt_not_found", "detail": str(exc)},
     )
 
 # ---------------------------------------------------------------------------
-# 3. Mount the UI
+# 4. Mount the Prompt Manager UI at /prompts
+#    This also registers /prompts/healthz for load-balancer liveness probes.
 # ---------------------------------------------------------------------------
 app.mount("/prompts", manager.mount_ui())
 
 
 # ---------------------------------------------------------------------------
-# 4. Use prompts anywhere in your application
+# 5. Your application routes — use prompts anywhere
 # ---------------------------------------------------------------------------
+
 @app.get("/summarize")
-async def summarize(text: str = "hello"):
-    # get_with_meta returns content + version_id in a single cache hit
+async def summarize(text: str = "hello world"):
+    """
+    Example route that fetches a prompt and uses it with an LLM.
+
+    Steps:
+    1. aget_prompt_with_meta() — single cache hit, returns content + version_id
+    2. Call your LLM with the prompt content
+    3. log_prompt_usage() — fire-and-forget, non-blocking
+    """
     meta = await aget_prompt_with_meta("summarize_prompt")
-    prompt = meta["content"]
 
-    # --- call your LLM here ---
-    output = f"[LLM output using prompt v{meta['version_id']}: {prompt[:40]}...]"
+    # --- Replace this with your actual LLM call ---
+    llm_output = f"[LLM output for: '{text[:60]}' using prompt v{meta['version_id']}]"
 
-    # Log usage with the exact version that served this request
-    log_prompt_usage("summarize_prompt", meta["version_id"], input_text=text, output_text=output)
+    # Log usage with the exact version that served this request.
+    # version_id is tracked automatically — no hardcoding needed.
+    log_prompt_usage(
+        "summarize_prompt",
+        meta["version_id"],
+        input_text=text,
+        output_text=llm_output,
+    )
 
-    return {"prompt_version": meta["version_id"], "output": output}
+    return {
+        "prompt_version": meta["version_id"],
+        "prompt_preview": meta["content"][:80],
+        "output": llm_output,
+    }
+
+
+@app.get("/health")
+async def health():
+    """Application-level health check. See /prompts/healthz for deeper checks."""
+    return {"status": "ok"}

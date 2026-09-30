@@ -17,14 +17,16 @@ def render_user_badge(user: Optional[dict], base: str = "") -> str:
     username = escape(user.get("username", "user"))
     role = escape(user.get("role", "editor"))
     admin_link = (
-        f'<a href="{base}/users" class="nav-link" style="color:var(--accent);font-weight:700;">Users</a>'
+        f'<a href="{base}/users" class="nav-link">Users</a>'
         if role.lower() == "admin"
         else ""
     )
+    initial = escape((user.get("username") or "U")[:1].upper())
     return f"""
-        <div style="display:flex;align-items:center;gap:8px;margin-left:12px;padding-left:12px;border-left:1px solid var(--line);">
-          <span style="font-size:0.82rem;color:#e2e8f0;font-weight:600;">👤 {username}</span>
-          <span class="badge badge-active" style="font-size:0.68rem;">{role.upper()}</span>
+        <div class="user-nav">
+          <span class="user-avatar" aria-hidden="true">{initial}</span>
+          <span class="user-name">{username}</span>
+          <span class="badge badge-active">{role.upper()}</span>
           {admin_link}
-          <a href="{base}/logout" class="nav-link" style="font-size:0.82rem;color:#feb2b2;">Logout</a>
+          <a href="{base}/logout" class="nav-link">Logout</a>
         </div>"""
