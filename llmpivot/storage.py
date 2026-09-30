@@ -122,6 +122,58 @@ class BaseStorage(ABC):
     ) -> List[Dict[str, Any]]:
         return []
 
+    # ------------------------------------------------------------------
+    # Prompt metadata (Phase 1 Pivot)
+    # ------------------------------------------------------------------
+
+    async def get_prompt_metadata(self, prompt_name: str, tenant_id: str = "default") -> Dict[str, Any]:
+        return {}
+
+    async def upsert_prompt_metadata(self, prompt_name: str, fields: Dict[str, Any], tenant_id: str = "default") -> None:
+        pass
+
+    # ------------------------------------------------------------------
+    # Prompt changelog (Phase 1 Pivot)
+    # ------------------------------------------------------------------
+
+    async def get_changelog(self, prompt_name: str, tenant_id: str = "default") -> List[Dict[str, Any]]:
+        return []
+
+    async def get_changelog_for_version(self, version_id: Any, tenant_id: str = "default") -> Optional[Dict[str, Any]]:
+        return None
+
+    async def upsert_changelog_entry(
+        self,
+        version_id: Any,
+        entry: str,
+        generated_by: str = "user",
+        created_by: str = "",
+        tenant_id: str = "default",
+    ) -> None:
+        pass
+
+    # ------------------------------------------------------------------
+    # Application context (Phase 1 Pivot)
+    # ------------------------------------------------------------------
+
+    async def get_app_context(self, tenant_id: str = "default") -> Optional[Dict[str, Any]]:
+        return None
+
+    async def save_app_context(self, content: str, created_by: str = "", tenant_id: str = "default") -> None:
+        pass
+
+    # ------------------------------------------------------------------
+    # Hierarchy helpers (Phase 1 Pivot)
+    # ------------------------------------------------------------------
+
+    async def fetch_prompt_children(self, prompt_name: str, tenant_id: str = "default") -> List[Dict[str, Any]]:
+        """Return all prompts whose parent_prompt_id points to prompt_name."""
+        return []
+
+    async def fetch_all_prompts_with_metadata(self, tenant_id: str = "default") -> List[Dict[str, Any]]:
+        """fetch_all_prompts enriched with prompt_type and parent info for the tree view."""
+        return []
+
 
 # ---------------------------------------------------------------------------
 # SQLite implementation
@@ -189,6 +241,43 @@ class SQLiteStorage(BaseStorage):
             tenant_id    TEXT DEFAULT 'default',
             created_at   DATETIME DEFAULT CURRENT_TIMESTAMP
         );
+
+        CREATE TABLE IF NOT EXISTS prompt_metadata (
+            id                INTEGER PRIMARY KEY AUTOINCREMENT,
+            prompt_id         INTEGER NOT NULL REFERENCES prompts(id),
+            tenant_id         TEXT DEFAULT 'default',
+            purpose           TEXT DEFAULT '',
+            prompt_type       TEXT DEFAULT 'unclassified',
+            parent_prompt_id  INTEGER REFERENCES prompts(id),
+            feature_area      TEXT DEFAULT '',
+            called_from       TEXT DEFAULT '',
+            model_used        TEXT DEFAULT '',
+            input_variables   TEXT DEFAULT '[]',
+            owner             TEXT DEFAULT '',
+            sensitivity       TEXT DEFAULT 'low',
+            notes             TEXT DEFAULT '',
+            updated_at        DATETIME DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(prompt_id, tenant_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS prompt_changelog (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            version_id     INTEGER NOT NULL REFERENCES prompt_versions(id),
+            tenant_id      TEXT DEFAULT 'default',
+            entry          TEXT NOT NULL,
+            generated_by   TEXT DEFAULT 'user',
+            created_at     DATETIME DEFAULT CURRENT_TIMESTAMP,
+            created_by     TEXT DEFAULT ''
+        );
+
+        CREATE TABLE IF NOT EXISTS app_context (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            tenant_id  TEXT DEFAULT 'default',
+            content    TEXT NOT NULL DEFAULT '',
+            version    INTEGER DEFAULT 1,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            created_by TEXT DEFAULT ''
+        );
         """)
 
         # Auto-migrations for existing databases
@@ -204,6 +293,29 @@ class SQLiteStorage(BaseStorage):
             if col not in cols:
                 try:
                     conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_def};")
+                except sqlite3.OperationalError:
+                    pass
+
+        # Phase 1 Pivot migrations — add new tables columns if upgrading an existing DB
+        # prompt_metadata: add any missing columns (table created above via CREATE IF NOT EXISTS)
+        cur.execute("PRAGMA table_info(prompt_metadata);")
+        pm_cols = [row[1] for row in cur.fetchall()]
+        for col, col_def in [
+            ("purpose", "TEXT DEFAULT ''"),
+            ("prompt_type", "TEXT DEFAULT 'unclassified'"),
+            ("parent_prompt_id", "INTEGER"),
+            ("feature_area", "TEXT DEFAULT ''"),
+            ("called_from", "TEXT DEFAULT ''"),
+            ("model_used", "TEXT DEFAULT ''"),
+            ("input_variables", "TEXT DEFAULT '[]'"),
+            ("owner", "TEXT DEFAULT ''"),
+            ("sensitivity", "TEXT DEFAULT 'low'"),
+            ("notes", "TEXT DEFAULT ''"),
+            ("updated_at", "DATETIME DEFAULT CURRENT_TIMESTAMP"),
+        ]:
+            if col not in pm_cols:
+                try:
+                    conn.execute(f"ALTER TABLE prompt_metadata ADD COLUMN {col} {col_def};")
                 except sqlite3.OperationalError:
                     pass
 
@@ -608,6 +720,243 @@ class SQLiteStorage(BaseStorage):
                 ORDER BY created_at DESC LIMIT ?
                 """,
                 (tenant_id, limit),
+            )
+            return [dict(r) for r in cur.fetchall()]
+        return await asyncio.to_thread(self._run_sqlite, _fn)
+
+    # ------------------------------------------------------------------
+    # Prompt metadata — Phase 1 Pivot
+    # ------------------------------------------------------------------
+
+    async def get_prompt_metadata(self, prompt_name: str, tenant_id: str = "default") -> Dict[str, Any]:
+        def _fn(conn):
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT pm.*
+                FROM prompt_metadata pm
+                JOIN prompts p ON p.id = pm.prompt_id
+                WHERE p.name = ? AND p.tenant_id = ? AND pm.tenant_id = ?
+                """,
+                (prompt_name, tenant_id, tenant_id),
+            )
+            row = cur.fetchone()
+            if not row:
+                return {}
+            d = dict(row)
+            # Resolve parent_prompt_id → parent_prompt_name
+            if d.get("parent_prompt_id"):
+                cur.execute("SELECT name FROM prompts WHERE id = ?", (d["parent_prompt_id"],))
+                pr = cur.fetchone()
+                d["parent_prompt_name"] = pr["name"] if pr else None
+            else:
+                d["parent_prompt_name"] = None
+            return d
+        return await asyncio.to_thread(self._run_sqlite, _fn)
+
+    async def upsert_prompt_metadata(self, prompt_name: str, fields: Dict[str, Any], tenant_id: str = "default") -> None:
+        def _fn(conn):
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT id FROM prompts WHERE name = ? AND tenant_id = ?",
+                (prompt_name, tenant_id),
+            )
+            row = cur.fetchone()
+            if not row:
+                return
+            prompt_id = row[0]
+
+            # Resolve parent name → id if provided as a string
+            parent_id = fields.get("parent_prompt_id")
+            if isinstance(parent_id, str) and parent_id:
+                cur.execute("SELECT id FROM prompts WHERE name = ? AND tenant_id = ?", (parent_id, tenant_id))
+                pr = cur.fetchone()
+                parent_id = pr[0] if pr else None
+            elif not parent_id:
+                parent_id = None
+
+            # Check if row exists
+            cur.execute(
+                "SELECT id FROM prompt_metadata WHERE prompt_id = ? AND tenant_id = ?",
+                (prompt_id, tenant_id),
+            )
+            existing = cur.fetchone()
+
+            allowed = {"purpose", "prompt_type", "feature_area", "called_from",
+                       "model_used", "input_variables", "owner", "sensitivity", "notes"}
+            safe_fields = {k: v for k, v in fields.items() if k in allowed}
+            safe_fields["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+
+            if existing:
+                set_clause = ", ".join(f"{k} = ?" for k in safe_fields)
+                set_clause += ", parent_prompt_id = ?"
+                vals = list(safe_fields.values()) + [parent_id, prompt_id, tenant_id]
+                conn.execute(
+                    f"UPDATE prompt_metadata SET {set_clause} WHERE prompt_id = ? AND tenant_id = ?",
+                    vals,
+                )
+            else:
+                safe_fields["parent_prompt_id"] = parent_id
+                safe_fields["prompt_id"] = prompt_id
+                safe_fields["tenant_id"] = tenant_id
+                cols = ", ".join(safe_fields.keys())
+                placeholders = ", ".join("?" for _ in safe_fields)
+                conn.execute(
+                    f"INSERT INTO prompt_metadata ({cols}) VALUES ({placeholders})",
+                    list(safe_fields.values()),
+                )
+        await asyncio.to_thread(self._run_sqlite, _fn)
+
+    # ------------------------------------------------------------------
+    # Prompt changelog — Phase 1 Pivot
+    # ------------------------------------------------------------------
+
+    async def get_changelog(self, prompt_name: str, tenant_id: str = "default") -> List[Dict[str, Any]]:
+        def _fn(conn):
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT pc.id, pc.version_id, pc.entry, pc.generated_by,
+                       pc.created_by, pc.created_at, pv.version_number
+                FROM prompt_changelog pc
+                JOIN prompt_versions pv ON pv.id = pc.version_id
+                JOIN prompts p ON p.id = pv.prompt_id
+                WHERE p.name = ? AND p.tenant_id = ? AND pc.tenant_id = ?
+                ORDER BY pv.version_number DESC
+                """,
+                (prompt_name, tenant_id, tenant_id),
+            )
+            return [dict(r) for r in cur.fetchall()]
+        return await asyncio.to_thread(self._run_sqlite, _fn)
+
+    async def get_changelog_for_version(self, version_id: Any, tenant_id: str = "default") -> Optional[Dict[str, Any]]:
+        try:
+            v_id = int(version_id)
+        except (ValueError, TypeError):
+            return None
+        def _fn(conn):
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT * FROM prompt_changelog WHERE version_id = ? AND tenant_id = ?",
+                (v_id, tenant_id),
+            )
+            row = cur.fetchone()
+            return dict(row) if row else None
+        return await asyncio.to_thread(self._run_sqlite, _fn)
+
+    async def upsert_changelog_entry(
+        self,
+        version_id: Any,
+        entry: str,
+        generated_by: str = "user",
+        created_by: str = "",
+        tenant_id: str = "default",
+    ) -> None:
+        try:
+            v_id = int(version_id)
+        except (ValueError, TypeError):
+            return
+        def _fn(conn):
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT id FROM prompt_changelog WHERE version_id = ? AND tenant_id = ?",
+                (v_id, tenant_id),
+            )
+            existing = cur.fetchone()
+            if existing:
+                conn.execute(
+                    "UPDATE prompt_changelog SET entry = ?, generated_by = ?, created_by = ? WHERE version_id = ? AND tenant_id = ?",
+                    (entry, generated_by, created_by, v_id, tenant_id),
+                )
+            else:
+                conn.execute(
+                    "INSERT INTO prompt_changelog (version_id, tenant_id, entry, generated_by, created_by) VALUES (?, ?, ?, ?, ?)",
+                    (v_id, tenant_id, entry, generated_by, created_by),
+                )
+        await asyncio.to_thread(self._run_sqlite, _fn)
+
+    # ------------------------------------------------------------------
+    # Application context — Phase 1 Pivot
+    # ------------------------------------------------------------------
+
+    async def get_app_context(self, tenant_id: str = "default") -> Optional[Dict[str, Any]]:
+        def _fn(conn):
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT * FROM app_context WHERE tenant_id = ? ORDER BY version DESC LIMIT 1",
+                (tenant_id,),
+            )
+            row = cur.fetchone()
+            return dict(row) if row else None
+        return await asyncio.to_thread(self._run_sqlite, _fn)
+
+    async def save_app_context(self, content: str, created_by: str = "", tenant_id: str = "default") -> None:
+        def _fn(conn):
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT COALESCE(MAX(version), 0) FROM app_context WHERE tenant_id = ?",
+                (tenant_id,),
+            )
+            next_v = cur.fetchone()[0] + 1
+            conn.execute(
+                "INSERT INTO app_context (tenant_id, content, version, created_by) VALUES (?, ?, ?, ?)",
+                (tenant_id, content, next_v, created_by),
+            )
+        await asyncio.to_thread(self._run_sqlite, _fn)
+
+    # ------------------------------------------------------------------
+    # Hierarchy helpers — Phase 1 Pivot
+    # ------------------------------------------------------------------
+
+    async def fetch_prompt_children(self, prompt_name: str, tenant_id: str = "default") -> List[Dict[str, Any]]:
+        def _fn(conn):
+            cur = conn.cursor()
+            # Get parent prompt id
+            cur.execute("SELECT id FROM prompts WHERE name = ? AND tenant_id = ?", (prompt_name, tenant_id))
+            row = cur.fetchone()
+            if not row:
+                return []
+            parent_id = row[0]
+            cur.execute(
+                """
+                SELECT p.name, pm.prompt_type, pm.purpose,
+                       pv.version_number AS active_version, pv.created_by AS last_edited_by, pv.created_at AS last_updated
+                FROM prompt_metadata pm
+                JOIN prompts p ON p.id = pm.prompt_id
+                LEFT JOIN prompt_versions pv ON pv.prompt_id = p.id AND pv.is_active = 1 AND pv.tenant_id = ?
+                WHERE pm.parent_prompt_id = ? AND pm.tenant_id = ? AND p.is_deleted = 0
+                ORDER BY p.name
+                """,
+                (tenant_id, parent_id, tenant_id),
+            )
+            return [dict(r) for r in cur.fetchall()]
+        return await asyncio.to_thread(self._run_sqlite, _fn)
+
+    async def fetch_all_prompts_with_metadata(self, tenant_id: str = "default") -> List[Dict[str, Any]]:
+        def _fn(conn):
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT p.id, p.name,
+                       pv.version_number AS active_version,
+                       pv.created_by     AS last_edited_by,
+                       pv.created_at     AS last_updated,
+                       COALESCE(pm.prompt_type, 'unclassified') AS prompt_type,
+                       pm.purpose,
+                       pm.parent_prompt_id,
+                       pm.sensitivity,
+                       pp.name AS parent_name
+                FROM prompts p
+                LEFT JOIN prompt_versions pv
+                    ON pv.prompt_id = p.id AND pv.is_active = 1 AND pv.tenant_id = ?
+                LEFT JOIN prompt_metadata pm
+                    ON pm.prompt_id = p.id AND pm.tenant_id = ?
+                LEFT JOIN prompts pp
+                    ON pp.id = pm.parent_prompt_id
+                WHERE p.tenant_id = ? AND p.is_deleted = 0
+                ORDER BY p.name
+                """,
+                (tenant_id, tenant_id, tenant_id),
             )
             return [dict(r) for r in cur.fetchall()]
         return await asyncio.to_thread(self._run_sqlite, _fn)

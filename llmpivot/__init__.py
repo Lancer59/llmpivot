@@ -40,6 +40,26 @@ async def aget_prompt_with_meta(name: str) -> dict:
     return await get_instance().get_with_meta(name)
 
 
+async def aget_prompt_with_fallback(name: str) -> str:
+    """
+    Async - tries the live cache/DB first; falls back to prompts_fallback.json on any error.
+
+    Use this instead of aget_prompt when you want zero-downtime resilience.
+    If llmpivot's DB is unreachable, the last known good version is served from the
+    fallback snapshot written to disk on every activation.
+
+    Example:
+        content = await aget_prompt_with_fallback("summary")
+        output = your_llm(content, user_input)
+
+    Returns:
+        str — the prompt content
+    Raises:
+        PromptNotFoundError — only when the prompt is absent from both live DB and snapshot
+    """
+    return await get_instance().get_with_fallback(name)
+
+
 def log_prompt_usage(
     prompt_name: str,
     version_id: int,
@@ -56,5 +76,6 @@ __all__ = [
     "get_prompt",
     "aget_prompt",
     "aget_prompt_with_meta",
+    "aget_prompt_with_fallback",
     "log_prompt_usage",
 ]

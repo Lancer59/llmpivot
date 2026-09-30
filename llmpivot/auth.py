@@ -89,7 +89,16 @@ def verify_password(password: str, password_hash: str) -> bool:
     try:
         if password_hash.startswith("argon2$"):
             from argon2 import PasswordHasher
-            from argon2.exceptions import VerifyMismatchError, VerifyInvalidError, InvalidHashError
+            from argon2.exceptions import VerifyMismatchError
+            # VerifyInvalidError was renamed to VerificationError in argon2-cffi 21+
+            try:
+                from argon2.exceptions import VerifyInvalidError
+            except ImportError:
+                from argon2.exceptions import VerificationError as VerifyInvalidError
+            try:
+                from argon2.exceptions import InvalidHashError
+            except ImportError:
+                InvalidHashError = Exception
             ph = PasswordHasher()
             raw_hash = password_hash[len("argon2$"):]
             try:

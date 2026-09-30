@@ -16,6 +16,7 @@ from collections import defaultdict
 from typing import Optional, TYPE_CHECKING
 from fastapi import APIRouter, Form, Request, UploadFile, File
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
+import asyncio
 
 from ..auth import (
     hash_password,
@@ -36,6 +37,11 @@ from .templates import (
     logs_page,
     login_page,
     users_page,
+    metadata_page,
+    changelog_page,
+    changelog_edit_page,
+    app_context_page,
+    tree_page,
 )
 from .helpers import escape as _escape
 
@@ -105,6 +111,89 @@ def _clear_login_failures(ip: str) -> None:
     """Clear failed-attempt history after a successful login."""
     _login_attempts.pop(ip, None)
     _login_lockouts.pop(ip, None)
+
+
+# ---------------------------------------------------------------------------
+# Auto-changelog helper (Phase 1 Pivot)
+# ---------------------------------------------------------------------------
+
+_CHANGELOG_SYSTEM_PROMPT = """\
+You are a prompt engineering assistant. A new version of a prompt has been saved.
+Given the old and new prompt content, write a concise changelog entry (2–4 sentences) that explains:
+1. What changed (specific wording, tone, structure, instructions)
+2. Why the change was likely made (inferred from the diff)
+3. Any downstream impact to watch for
+
+Write in past tense. Be specific. Do not pad with filler phrases.
+Return only the changelog entry text, no headers or bullet points."""
+
+
+async def _generate_changelog(
+    manager: "PromptManager",
+    prompt_name: str,
+    version_id: int,
+    old_content: str,
+    new_content: str,
+    editor: str,
+) -> None:
+    """
+    Background coroutine: calls the LLM to generate a changelog entry and saves it.
+    Failures are logged as WARNING and never propagate.
+    """
+    import logging as _logging
+    _log = _logging.getLogger("llmpivot.changelog")
+    try:
+        import difflib
+        diff_lines = list(difflib.unified_diff(
+            (old_content or "").splitlines(),
+            (new_content or "").splitlines(),
+            lineterm="",
+        ))
+        diff_text = "\n".join(diff_lines[:80]) or "(new prompt — no previous version)"
+
+        # Optionally include metadata context
+        meta = await manager.storage.get_prompt_metadata(prompt_name, tenant_id=manager.tenant_id)
+        purpose = meta.get("purpose", "") if meta else ""
+        meta_context = f"\nPrompt purpose: {purpose}" if purpose else ""
+
+        user_msg = (
+            f"Prompt name: {prompt_name}{meta_context}\n\n"
+            f"Diff (unified format):\n{diff_text}\n\n"
+            f"New content:\n{new_content[:1500]}"
+        )
+
+        # Use a Pivot-specific LLM client if model differs, otherwise reuse manager.llm
+        if manager.pivot_model and manager.pivot_model != manager.llm._model:
+            from ..llm import LLMClient
+            llm = LLMClient(
+                url=manager.llm._url,
+                api_key=manager.llm._api_key,
+                model=manager.pivot_model,
+                system_prompt=_CHANGELOG_SYSTEM_PROMPT,
+            )
+        else:
+            # Temporarily override system prompt
+            from ..llm import LLMClient
+            llm = LLMClient(
+                url=manager.llm._url,
+                api_key=manager.llm._api_key,
+                model=manager.llm._model,
+                system_prompt=_CHANGELOG_SYSTEM_PROMPT,
+            )
+
+        entry = await llm._call(_CHANGELOG_SYSTEM_PROMPT, user_msg)
+        entry = entry.strip()
+
+        await manager.storage.upsert_changelog_entry(
+            version_id=version_id,
+            entry=entry,
+            generated_by="pivot",
+            created_by=editor,
+            tenant_id=manager.tenant_id,
+        )
+        _log.info("Auto-changelog generated for %s v%s", prompt_name, version_id)
+    except Exception as exc:
+        _log.warning("Auto-changelog generation failed for %s (non-fatal): %s", prompt_name, exc)
 
 
 def _build_router(manager: "PromptManager") -> APIRouter:
@@ -357,6 +446,18 @@ def _build_router(manager: "PromptManager") -> APIRouter:
             detail=f"tag={tag} active={do_activate}", tenant_id=manager.tenant_id,
         )
         manager.cache.invalidate(prompt_name)
+        if do_activate:
+            manager.schedule_snapshot_refresh()
+
+        # Auto-changelog: generate asynchronously, don't block the redirect
+        if manager.auto_changelog and manager.llm:
+            versions_after = await manager.storage.fetch_prompt_versions(prompt_name, tenant_id=manager.tenant_id)
+            new_ver = next((v for v in versions_after if v["version_number"] == version_num), None)
+            if new_ver:
+                asyncio.get_event_loop().create_task(
+                    _generate_changelog(manager, prompt_name, new_ver["id"], "", content, creator)
+                )
+
         return RedirectResponse(f"{base}/detail/{prompt_name}", status_code=303)
 
     @router.get("/edit/{name}", response_class=HTMLResponse)
@@ -369,8 +470,11 @@ def _build_router(manager: "PromptManager") -> APIRouter:
         versions = await manager.storage.fetch_prompt_versions(name, tenant_id=manager.tenant_id)
         active = next((v for v in versions if v["is_active"]), None)
         current = active["content"] if active else ""
+        children = await manager.storage.fetch_prompt_children(name, tenant_id=manager.tenant_id)
+        metadata = await manager.storage.get_prompt_metadata(name, tenant_id=manager.tenant_id)
         return HTMLResponse(
-            edit_page(name, current, manager.protected_mode, manager.has_llm, _base(request), user=user, csrf_token=csrf)
+            edit_page(name, current, manager.protected_mode, manager.has_llm, _base(request),
+                      user=user, csrf_token=csrf, children=children, metadata=metadata)
         )
 
     @router.post("/edit/{name}", response_class=HTMLResponse)
@@ -425,6 +529,21 @@ def _build_router(manager: "PromptManager") -> APIRouter:
             detail=f"tag={tag} active={do_activate}", tenant_id=manager.tenant_id,
         )
         manager.cache.invalidate(name)
+        if do_activate:
+            manager.schedule_snapshot_refresh()
+
+        # Auto-changelog: fetch old content for diff, generate in background
+        if manager.auto_changelog and manager.llm:
+            versions_after = await manager.storage.fetch_prompt_versions(name, tenant_id=manager.tenant_id)
+            new_ver = next((v for v in versions_after if v["version_number"] == version_num), None)
+            # Previous version is the one before the new one
+            prev_ver = next((v for v in versions_after if v["version_number"] == version_num - 1), None)
+            old_content = prev_ver["content"] if prev_ver else ""
+            if new_ver:
+                asyncio.get_event_loop().create_task(
+                    _generate_changelog(manager, name, new_ver["id"], old_content, content, editor_name)
+                )
+
         return RedirectResponse(f"{base}/detail/{name}", status_code=303)
 
     # ------------------------------------------------------------------
@@ -469,6 +588,7 @@ def _build_router(manager: "PromptManager") -> APIRouter:
             tenant_id=manager.tenant_id,
         )
         manager.cache.invalidate(name)
+        manager.schedule_snapshot_refresh()
         return RedirectResponse(f"{base}/detail/{name}", status_code=303)
 
     # ------------------------------------------------------------------
@@ -683,6 +803,212 @@ def _build_router(manager: "PromptManager") -> APIRouter:
             return JSONResponse({"output": output})
         except Exception as exc:
             return JSONResponse({"detail": "LLM request failed. Please try again later."}, status_code=502)
+
+    # ------------------------------------------------------------------
+    # Phase 1 Pivot routes — Metadata, Changelog, App Context, Tree
+    # ------------------------------------------------------------------
+
+    @router.get("/tree", response_class=HTMLResponse)
+    async def tree_view(request: Request):
+        auth_redirect = _check_auth(request, min_role="viewer")
+        if auth_redirect:
+            return auth_redirect
+        user = _get_user(request)
+        prompts = await manager.storage.fetch_all_prompts_with_metadata(tenant_id=manager.tenant_id)
+        return HTMLResponse(tree_page(prompts, manager.protected_mode, _base(request), user=user))
+
+    @router.get("/metadata/{name}", response_class=HTMLResponse)
+    async def metadata_get(name: str, request: Request):
+        auth_redirect = _check_auth(request, min_role="viewer")
+        if auth_redirect:
+            return auth_redirect
+        user = _get_user(request)
+        csrf = _get_csrf(request)
+        meta = await manager.storage.get_prompt_metadata(name, tenant_id=manager.tenant_id)
+        all_prompts = await manager.storage.fetch_all_prompts_with_metadata(tenant_id=manager.tenant_id)
+        return HTMLResponse(
+            metadata_page(name, meta, all_prompts, manager.protected_mode,
+                          _base(request), user=user, csrf_token=csrf)
+        )
+
+    @router.post("/metadata/{name}", response_class=HTMLResponse)
+    async def metadata_post(
+        name: str,
+        request: Request,
+        prompt_type: str = Form("unclassified"),
+        parent_prompt_id: str = Form(""),
+        sensitivity: str = Form("low"),
+        feature_area: str = Form(""),
+        owner: str = Form(""),
+        purpose: str = Form(""),
+        called_from: str = Form(""),
+        model_used: str = Form(""),
+        input_variables: str = Form(""),
+        notes: str = Form(""),
+        csrf_token: Optional[str] = Form(None),
+    ):
+        auth_redirect = _check_auth(request, min_role="editor")
+        if auth_redirect:
+            return auth_redirect
+
+        base = _base(request)
+        user = _get_user(request)
+        csrf = _get_csrf(request)
+
+        if not _validate_csrf(request, csrf_token):
+            all_prompts = await manager.storage.fetch_all_prompts_with_metadata(tenant_id=manager.tenant_id)
+            return HTMLResponse(
+                metadata_page(name, {}, all_prompts, manager.protected_mode, base,
+                              user=user, csrf_token=csrf, error="Invalid or missing CSRF token."),
+                status_code=403,
+            )
+
+        fields = {
+            "prompt_type": prompt_type or "unclassified",
+            "parent_prompt_id": parent_prompt_id or None,
+            "sensitivity": sensitivity or "low",
+            "feature_area": feature_area,
+            "owner": owner,
+            "purpose": purpose,
+            "called_from": called_from,
+            "model_used": model_used,
+            "input_variables": input_variables,
+            "notes": notes,
+        }
+        await manager.storage.upsert_prompt_metadata(name, fields, tenant_id=manager.tenant_id)
+        await manager.storage.insert_audit_log(
+            action="metadata_updated", performed_by=_actor(request),
+            prompt_name=name, tenant_id=manager.tenant_id,
+        )
+
+        meta = await manager.storage.get_prompt_metadata(name, tenant_id=manager.tenant_id)
+        all_prompts = await manager.storage.fetch_all_prompts_with_metadata(tenant_id=manager.tenant_id)
+        return HTMLResponse(
+            metadata_page(name, meta, all_prompts, manager.protected_mode, base,
+                          user=user, csrf_token=csrf, success="Metadata saved.")
+        )
+
+    @router.get("/changelog/{name}", response_class=HTMLResponse)
+    async def changelog_get(name: str, request: Request):
+        auth_redirect = _check_auth(request, min_role="viewer")
+        if auth_redirect:
+            return auth_redirect
+        user = _get_user(request)
+        csrf = _get_csrf(request)
+        changelog = await manager.storage.get_changelog(name, tenant_id=manager.tenant_id)
+        versions = await manager.storage.fetch_prompt_versions(name, tenant_id=manager.tenant_id)
+        return HTMLResponse(
+            changelog_page(name, changelog, versions, manager.protected_mode,
+                           _base(request), user=user, csrf_token=csrf)
+        )
+
+    @router.get("/changelog/{name}/edit/{version_id}", response_class=HTMLResponse)
+    async def changelog_edit_get(name: str, version_id: str, request: Request):
+        auth_redirect = _check_auth(request, min_role="editor")
+        if auth_redirect:
+            return auth_redirect
+        user = _get_user(request)
+        csrf = _get_csrf(request)
+        version = await manager.storage.fetch_version_by_id(version_id, tenant_id=manager.tenant_id)
+        if not version:
+            return HTMLResponse("Version not found.", status_code=404)
+        existing = await manager.storage.get_changelog_for_version(version_id, tenant_id=manager.tenant_id)
+        entry_text = existing.get("entry", "") if existing else ""
+        return HTMLResponse(
+            changelog_edit_page(name, version_id, version["version_number"], entry_text,
+                                manager.protected_mode, _base(request), user=user, csrf_token=csrf)
+        )
+
+    @router.post("/changelog/{name}/edit/{version_id}", response_class=HTMLResponse)
+    async def changelog_edit_post(
+        name: str,
+        version_id: str,
+        request: Request,
+        entry: str = Form(...),
+        csrf_token: Optional[str] = Form(None),
+    ):
+        auth_redirect = _check_auth(request, min_role="editor")
+        if auth_redirect:
+            return auth_redirect
+
+        base = _base(request)
+        user = _get_user(request)
+        csrf = _get_csrf(request)
+
+        if not _validate_csrf(request, csrf_token):
+            version = await manager.storage.fetch_version_by_id(version_id, tenant_id=manager.tenant_id)
+            v_num = version["version_number"] if version else "?"
+            return HTMLResponse(
+                changelog_edit_page(name, version_id, v_num, entry,
+                                    manager.protected_mode, base, user=user, csrf_token=csrf),
+                status_code=403,
+            )
+
+        await manager.storage.upsert_changelog_entry(
+            version_id=version_id,
+            entry=entry,
+            generated_by="user",
+            created_by=_actor(request),
+            tenant_id=manager.tenant_id,
+        )
+        return RedirectResponse(f"{base}/changelog/{name}", status_code=303)
+
+    @router.get("/context", response_class=HTMLResponse)
+    async def context_get(request: Request):
+        auth_redirect = _check_auth(request, min_role="viewer")
+        if auth_redirect:
+            return auth_redirect
+        user = _get_user(request)
+        csrf = _get_csrf(request)
+        ctx = await manager.storage.get_app_context(tenant_id=manager.tenant_id)
+        return HTMLResponse(
+            app_context_page(ctx, manager.protected_mode, _base(request), user=user, csrf_token=csrf)
+        )
+
+    @router.post("/context", response_class=HTMLResponse)
+    async def context_post(
+        request: Request,
+        content: str = Form(...),
+        csrf_token: Optional[str] = Form(None),
+    ):
+        auth_redirect = _check_auth(request, min_role="editor")
+        if auth_redirect:
+            return auth_redirect
+
+        base = _base(request)
+        user = _get_user(request)
+        csrf = _get_csrf(request)
+
+        if not _validate_csrf(request, csrf_token):
+            ctx = await manager.storage.get_app_context(tenant_id=manager.tenant_id)
+            return HTMLResponse(
+                app_context_page(ctx, manager.protected_mode, base, user=user, csrf_token=csrf,
+                                 error="Invalid or missing CSRF token."),
+                status_code=403,
+            )
+
+        if len(content.encode("utf-8")) > _MAX_CONTENT_BYTES:
+            ctx = await manager.storage.get_app_context(tenant_id=manager.tenant_id)
+            return HTMLResponse(
+                app_context_page(ctx, manager.protected_mode, base, user=user, csrf_token=csrf,
+                                 error=f"Content exceeds maximum size ({_MAX_CONTENT_BYTES // 1024} KB)."),
+                status_code=400,
+            )
+
+        await manager.storage.save_app_context(
+            content=content,
+            created_by=_actor(request),
+            tenant_id=manager.tenant_id,
+        )
+        await manager.storage.insert_audit_log(
+            action="app_context_updated", performed_by=_actor(request),
+            tenant_id=manager.tenant_id,
+        )
+        ctx = await manager.storage.get_app_context(tenant_id=manager.tenant_id)
+        return HTMLResponse(
+            app_context_page(ctx, manager.protected_mode, base, user=user, csrf_token=csrf,
+                             success="Application context saved.")
+        )
 
     return router
 

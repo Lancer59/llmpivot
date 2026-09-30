@@ -8,10 +8,18 @@ Production hardening in this version:
 - /healthz endpoint does real liveness checks (DB query + worker task health).
 - Cache pre-warm on startup: fetches all active prompts before serving traffic.
 - Graceful shutdown: drains logger queue before cancelling background tasks.
+
+Phase 1 additions:
+- pivot_enabled / pivot_proactive / auto_changelog params.
+- fallback_snapshot: writes prompts_fallback.json atomically on every activation + warm.
+- aget_prompt_with_fallback: tries live cache, falls back to snapshot file on any error.
 """
 
 import asyncio
+import json
 import logging
+import os
+import tempfile
 from contextlib import asynccontextmanager
 from typing import Optional
 
@@ -53,6 +61,14 @@ class PromptManager:
         llm_api_key: Optional[str] = None,
         llm_model: str = "gpt-3.5-turbo",
         llm_suggester_prompt: Optional[str] = None,
+        # Phase 1 Pivot params
+        pivot_enabled: bool = False,          # master switch for all Pivot features
+        pivot_proactive: bool = True,          # proactive observations; False = chat-only
+        auto_changelog: bool = True,           # auto-generate changelog on version save
+        pivot_model: Optional[str] = None,     # LLM model for Pivot; defaults to llm_model
+        # Fallback snapshot
+        fallback_snapshot: bool = True,        # write prompts_fallback.json on activation + warm
+        fallback_path: Optional[str] = None,   # override path; default = next to db_path
     ):
         global _instance
 
@@ -65,6 +81,21 @@ class PromptManager:
         self.log_sample_rate = log_sample_rate
         self.bootstrap_admin = bootstrap_admin
         self.bootstrap_password = bootstrap_password
+
+        # Phase 1 Pivot
+        self.pivot_enabled = pivot_enabled
+        self.pivot_proactive = pivot_proactive
+        self.auto_changelog = auto_changelog and pivot_enabled
+        self.pivot_model = pivot_model or llm_model
+
+        # Fallback snapshot
+        self.fallback_snapshot = fallback_snapshot
+        if fallback_path:
+            self.fallback_path = fallback_path
+        else:
+            # Default: same directory as the SQLite db file
+            db_dir = os.path.dirname(os.path.abspath(db_path)) if storage_type != "mongodb" else os.getcwd()
+            self.fallback_path = os.path.join(db_dir, "prompts_fallback.json")
 
         if protected_mode and auth_mode == "disabled":
             self.auth_mode = "protected"
@@ -119,17 +150,25 @@ class PromptManager:
 
         _instance = self
         logger.info(
-            "PromptManager initialised (storage=%s, tenant=%s, ttl=%ds, auth_mode=%s, cookie_secure=%s)",
+            "PromptManager initialised (storage=%s, tenant=%s, ttl=%ds, auth_mode=%s, "
+            "cookie_secure=%s, pivot_enabled=%s, fallback_snapshot=%s)",
             storage_type,
             tenant_id,
             cache_ttl,
             self.auth_mode,
             cookie_secure,
+            pivot_enabled,
+            fallback_snapshot,
         )
 
     @property
     def has_llm(self) -> bool:
         return self.llm is not None
+
+    @property
+    def has_pivot_llm(self) -> bool:
+        """True when pivot is enabled AND an LLM is configured."""
+        return self.pivot_enabled and self.llm is not None
 
     async def _bootstrap_admin(self) -> None:
         """Create the default admin user if bootstrap_admin=True and no admin exists yet."""
@@ -168,6 +207,55 @@ class PromptManager:
             logger.info("Cache pre-warm complete: %d prompt(s) loaded.", warmed)
         except Exception as exc:
             logger.warning("Cache pre-warm failed (non-fatal): %s", exc)
+
+        # Write fallback snapshot after warm so the file is always current post-restart
+        await self._write_fallback_snapshot()
+
+    async def _write_fallback_snapshot(self) -> None:
+        """
+        Atomically write prompts_fallback.json with all currently active prompt contents.
+
+        Format: {"prompt_name": "content", ...}
+
+        Uses write-to-temp + os.replace() so the file is never partially written.
+        Failures are logged as WARNING and never propagate — the snapshot is best-effort.
+        """
+        if not self.fallback_snapshot:
+            return
+        try:
+            data = await self.storage.export_prompts(tenant_id=self.tenant_id)
+            snapshot_dir = os.path.dirname(self.fallback_path)
+            # Write atomically: temp file in same dir → os.replace (atomic on POSIX + Windows)
+            fd, tmp_path = tempfile.mkstemp(dir=snapshot_dir, suffix=".tmp")
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+                os.replace(tmp_path, self.fallback_path)
+                logger.debug("Fallback snapshot written: %d prompt(s) → %s", len(data), self.fallback_path)
+            except Exception:
+                # Clean up temp file on failure
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                raise
+        except Exception as exc:
+            logger.warning("Failed to write fallback snapshot (non-fatal): %s", exc)
+
+    def _load_fallback_snapshot(self) -> dict:
+        """
+        Read prompts_fallback.json synchronously.
+        Returns empty dict if file doesn't exist or is unreadable.
+        Used by get_with_fallback on cold start or DB failure.
+        """
+        try:
+            with open(self.fallback_path, encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+        except Exception:
+            pass
+        return {}
 
     async def _shutdown(self) -> None:
         """
@@ -272,6 +360,26 @@ class PromptManager:
             raise PromptNotFoundError(f"No active prompt found for '{name}'")
         return {"content": entry["content"], "version_id": entry["version_id"]}
 
+    async def get_with_fallback(self, name: str) -> str:
+        """
+        Async — tries live cache/DB first; falls back to prompts_fallback.json on any error.
+        Returns the prompt content string.
+        Raises PromptNotFoundError only if the prompt is absent from both sources.
+        """
+        try:
+            return await self.get(name)
+        except Exception as live_exc:
+            logger.warning(
+                "Live prompt fetch failed for '%s' (%s); trying fallback snapshot.", name, live_exc
+            )
+            snapshot = self._load_fallback_snapshot()
+            if name in snapshot:
+                logger.info("Serving '%s' from fallback snapshot.", name)
+                return snapshot[name]
+            raise PromptNotFoundError(
+                f"No active prompt found for '{name}' in live DB or fallback snapshot."
+            ) from live_exc
+
     def get_sync(self, name: str) -> str:
         """Sync convenience wrapper."""
         try:
@@ -296,6 +404,21 @@ class PromptManager:
 
     def log_usage(self, prompt_name: str, version_id: int, input_text: str, output_text: str) -> None:
         self.usage_logger.log(prompt_name, version_id, input_text, output_text)
+
+    def schedule_snapshot_refresh(self) -> None:
+        """
+        Fire-and-forget: schedule a fallback snapshot refresh on the running event loop.
+        Called by routes after any activation or version creation.
+        Never blocks the caller.
+        """
+        if not self.fallback_snapshot:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(self._write_fallback_snapshot())
+        except RuntimeError:
+            # No running loop — skip silently (only happens in sync test contexts)
+            pass
 
 
 def get_instance() -> PromptManager:

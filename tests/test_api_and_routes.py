@@ -1,6 +1,7 @@
 import os
 import tempfile
 import unittest
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock
 
 from fastapi import FastAPI
@@ -16,6 +17,30 @@ def _get_csrf(client: TestClient, session_cookie: str, secret_key: str) -> str:
 
 
 SECRET = "test-secret-key"
+
+
+def _make_test_client(manager: PromptManager) -> TestClient:
+    """
+    Create a TestClient that correctly triggers the lifespan of both the
+    parent app and the mounted sub-app (which calls _bootstrap_admin).
+
+    Starlette's TestClient does NOT run sub-app lifespans when using
+    app.mount(); we work around this with a parent lifespan that
+    bootstraps the manager directly.
+    """
+    import asyncio
+
+    @asynccontextmanager
+    async def _lifespan(app):
+        await manager._bootstrap_admin()
+        manager.cache.start()
+        manager.usage_logger.start()
+        yield
+        await manager._shutdown()
+
+    app = FastAPI(lifespan=_lifespan)
+    app.mount("/prompts", manager.mount_ui())
+    return TestClient(app, follow_redirects=False)
 
 
 class APIAndRoutesTests(unittest.TestCase):
@@ -36,19 +61,21 @@ class APIAndRoutesTests(unittest.TestCase):
         self.manager.llm.suggest = AsyncMock(return_value="Improved system prompt version.")
         self.manager.llm.run = AsyncMock(return_value="Mock LLM execution output.")
 
-        self.app = FastAPI()
-        self.app.mount("/prompts", self.manager.mount_ui())
-        self.client = TestClient(self.app, follow_redirects=False)
+        # Use context-manager form so lifespan (and _bootstrap_admin) runs
+        self._client_ctx = _make_test_client(self.manager)
+        self.client = self._client_ctx.__enter__()
 
     def tearDown(self):
+        try:
+            self._client_ctx.__exit__(None, None, None)
+        except Exception:
+            pass
         self.tmp_dir.cleanup()
 
     def _login(self):
         """Log in as admin and return (cookies_dict, csrf_token)."""
-        import asyncio
-        asyncio.run(self.manager._bootstrap_admin())
         res = self.client.post("/prompts/login", data={"username": "admin", "password": "admin"})
-        self.assertEqual(res.status_code, 303)
+        self.assertEqual(res.status_code, 303, f"Login failed: {res.text[:200]}")
         session_cookie = res.cookies["llmpivot_session"]
         cookies = {"llmpivot_session": session_cookie}
         csrf = _get_csrf(self.client, session_cookie, SECRET)
@@ -61,28 +88,34 @@ class APIAndRoutesTests(unittest.TestCase):
 
     def test_admin_bootstrap_requires_explicit_opt_in(self):
         import asyncio
-        manager = PromptManager(
-            db_path=self.db_path,
-            auth_mode="rbac",
-            secret_key="another-test-secret",
-        )
-        asyncio.run(manager._bootstrap_admin())
-        user = asyncio.run(manager.storage.get_user("admin", tenant_id="default"))
-        self.assertIsNone(user)
+        tmp2 = tempfile.TemporaryDirectory()
+        try:
+            manager2 = PromptManager(
+                db_path=os.path.join(tmp2.name, "test2.db"),
+                auth_mode="rbac",
+                secret_key="another-test-secret",
+                # bootstrap_admin not set — default False
+            )
+            asyncio.run(manager2._bootstrap_admin())
+            user = asyncio.run(manager2.storage.get_user("admin", tenant_id="default"))
+            self.assertIsNone(user)
+        finally:
+            tmp2.cleanup()
 
     def test_secret_key_guard_raises_for_default(self):
         """PromptManager must raise ValueError when using the default key with rbac mode."""
-        with self.assertRaises(ValueError):
-            PromptManager(
-                db_path=self.db_path,
-                auth_mode="rbac",
-                # no secret_key — will use the default public one
-            )
+        tmp2 = tempfile.TemporaryDirectory()
+        try:
+            with self.assertRaises(ValueError):
+                PromptManager(
+                    db_path=os.path.join(tmp2.name, "test2.db"),
+                    auth_mode="rbac",
+                    # no secret_key — will use the default public one
+                )
+        finally:
+            tmp2.cleanup()
 
     def test_login_flow(self):
-        import asyncio
-        asyncio.run(self.manager._bootstrap_admin())
-
         res_bad = self.client.post("/prompts/login", data={"username": "admin", "password": "wrongpassword"})
         self.assertEqual(res_bad.status_code, 400)
         self.assertIn("Invalid username or password", res_bad.text)
@@ -91,11 +124,15 @@ class APIAndRoutesTests(unittest.TestCase):
         self.assertEqual(res_ok.status_code, 303)
         self.assertIn("llmpivot_session", res_ok.cookies)
 
-        cookies = {"llmpivot_session": res_ok.cookies["llmpivot_session"]}
-        res_list = self.client.get("/prompts/list", cookies=cookies)
+        # Set cookie on client directly (per-request cookies deprecated in Starlette)
+        self.client.cookies.set("llmpivot_session", res_ok.cookies["llmpivot_session"])
+        res_list = self.client.get("/prompts/list")
+        self.client.cookies.clear()
         self.assertEqual(res_list.status_code, 200)
         self.assertIn("Prompts", res_list.text)
-        self.assertIn("👤 admin", res_list.text)
+        # User nav renders as avatar initials + username text, not emoji
+        self.assertIn("admin", res_list.text)
+        self.assertIn("ADMIN", res_list.text)
 
     def test_prompt_creation_and_viewing(self):
         cookies, csrf = self._login()

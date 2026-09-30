@@ -182,7 +182,9 @@ def _layout(title: str, body: str, protected: bool = False, base: str = "", user
     {badge}
     <div class="nav-links">
       <a href="{base}/list" class="nav-link">Prompts</a>
+      <a href="{base}/tree" class="nav-link">Hierarchy</a>
       <a href="{base}/edit/__new__" class="nav-link">+ New Prompt</a>
+      <a href="{base}/context" class="nav-link">Context</a>
       <a href="{base}/import" class="nav-link">Import</a>
       <a href="{base}/export" class="nav-link">Export</a>
       <a href="{base}/logs" class="nav-link">Logs</a>
@@ -300,6 +302,8 @@ def prompt_detail(
   </div>
   <div class="flex">
     <a href="{base}/edit/{name}" class="btn btn-primary">Create New Version</a>
+    <a href="{base}/metadata/{name}" class="btn btn-ghost">Metadata</a>
+    <a href="{base}/changelog/{name}" class="btn btn-ghost">Changelog</a>
     <a href="{base}/diff/{name}" class="btn btn-ghost">Diff Versions</a>
     <a href="{base}/test/{name}" class="btn btn-ghost">A/B Test</a>
   </div>
@@ -331,11 +335,33 @@ def edit_page(
     is_new: bool = False,
     user: Optional[dict] = None,
     csrf_token: Optional[str] = None,
+    children: Optional[List[Dict[str, Any]]] = None,
+    metadata: Optional[Dict[str, Any]] = None,
 ) -> str:
     err_div = f'<div class="error">{error}</div>' if error else ""
     csrf = _csrf_field(csrf_token)
     action = f"{base}/edit/__new__" if is_new else f"{base}/edit/{name}"
     title_text = "Create New Prompt" if is_new else f"Edit: {name}"
+
+    hierarchy_warning = "" if is_new else _hierarchy_warning_panel(children or [], base, name)
+
+    # Metadata context strip — shown when metadata exists and has a purpose
+    meta_strip = ""
+    if not is_new and metadata:
+        purpose = metadata.get("purpose") or ""
+        ptype = metadata.get("prompt_type") or ""
+        owner = metadata.get("owner") or ""
+        sensitivity = metadata.get("sensitivity") or "low"
+        if purpose or ptype not in ("", "unclassified"):
+            meta_strip = f"""
+<div style="background:rgba(10,20,38,.6);border:1px solid var(--line-soft);border-radius:9px;
+            padding:11px 16px;margin-bottom:16px;display:flex;align-items:center;gap:14px;flex-wrap:wrap;">
+  {_type_badge(ptype)}
+  {_sensitivity_badge(sensitivity)}
+  {"<span style='font-size:.83rem;color:var(--muted-strong);'>" + _escape(purpose) + "</span>" if purpose else ""}
+  {"<span style='font-size:.78rem;color:var(--muted);'>Owner: " + _escape(owner) + "</span>" if owner else ""}
+  <a href="{base}/metadata/{_escape(name)}" style="font-size:.78rem;margin-left:auto;">Edit metadata →</a>
+</div>"""
 
     name_input = f"""
     <div class="form-group">
@@ -379,6 +405,8 @@ def edit_page(
     body = f"""
 <h1>{_escape(title_text)}</h1>
 {err_div}
+{hierarchy_warning}
+{meta_strip}
 <form method="post" action="{action}">
   {csrf}
   {name_input}
@@ -678,3 +706,519 @@ def users_page(
   </table>
 </div>"""
     return _layout("User Management", body, False, base, current_user)
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 Pivot templates
+# ---------------------------------------------------------------------------
+
+_PROMPT_TYPES = ["unclassified", "agent", "tool", "sub-agent", "utility", "system"]
+_SENSITIVITIES = ["low", "medium", "high"]
+
+_TYPE_BADGE_CLASS = {
+    "agent":       "badge-prod",
+    "tool":        "badge-staging",
+    "sub-agent":   "badge-experiment",
+    "utility":     "badge-active",
+    "system":      "badge-active",
+    "unclassified": "",
+}
+
+
+def _type_badge(prompt_type: str) -> str:
+    t = prompt_type or "unclassified"
+    cls = _TYPE_BADGE_CLASS.get(t, "")
+    style = ' style="background:rgba(150,175,207,.08);border-color:rgba(150,175,207,.2);color:#8fa1b8;"' if not cls else ""
+    return f'<span class="badge {cls}"{style}>{_escape(t)}</span>'
+
+
+def _sensitivity_badge(sensitivity: str) -> str:
+    s = (sensitivity or "low").lower()
+    if s == "high":
+        return '<span class="badge" style="background:rgba(255,120,120,.12);border-color:rgba(255,120,120,.25);color:#ffb4b4;">HIGH</span>'
+    if s == "medium":
+        return '<span class="badge badge-staging">MEDIUM</span>'
+    return '<span class="badge" style="background:rgba(100,200,150,.1);border-color:rgba(100,200,150,.2);color:#82d6b2;">LOW</span>'
+
+
+def metadata_page(
+    name: str,
+    metadata: dict,
+    all_prompts: list,
+    protected: bool = False,
+    base: str = "",
+    user: Optional[dict] = None,
+    csrf_token: Optional[str] = None,
+    success: Optional[str] = None,
+    error: Optional[str] = None,
+) -> str:
+    csrf = _csrf_field(csrf_token)
+    err_div = f'<div class="error">{_escape(error)}</div>' if error else ""
+    succ_div = f'<div class="success">{_escape(success)}</div>' if success else ""
+
+    meta = metadata or {}
+
+    # Build prompt type options
+    type_opts = "".join(
+        f'<option value="{t}"{" selected" if meta.get("prompt_type", "unclassified") == t else ""}>{t}</option>'
+        for t in _PROMPT_TYPES
+    )
+
+    # Build sensitivity options
+    sens_opts = "".join(
+        f'<option value="{s}"{" selected" if meta.get("sensitivity", "low") == s else ""}>{s}</option>'
+        for s in _SENSITIVITIES
+    )
+
+    # Build parent prompt options
+    parent_opts = '<option value="">(None — top-level)</option>'
+    current_parent = meta.get("parent_prompt_name") or meta.get("parent_prompt_id") or ""
+    for p in all_prompts:
+        pname = p.get("name", "")
+        if pname == name:
+            continue  # can't be own parent
+        selected = " selected" if str(current_parent) == pname else ""
+        ptype = p.get("prompt_type", "")
+        label = f"{pname} [{ptype}]" if ptype and ptype != "unclassified" else pname
+        parent_opts += f'<option value="{_escape(pname)}"{selected}>{_escape(label)}</option>'
+
+    body = f"""
+<div class="flex-between" style="margin-bottom:20px;">
+  <div>
+    <h1>Metadata: <span style="color:var(--accent);">{_escape(name)}</span></h1>
+    <p class="text-muted" style="font-size:.88rem;margin-top:4px;">
+      Document this prompt's purpose, type, and place in the hierarchy.
+    </p>
+  </div>
+  <div class="flex">
+    <a href="{base}/detail/{_escape(name)}" class="btn btn-ghost">← Back to Detail</a>
+    <a href="{base}/changelog/{_escape(name)}" class="btn btn-ghost">Changelog</a>
+  </div>
+</div>
+
+{err_div}{succ_div}
+
+<form method="post" action="{base}/metadata/{_escape(name)}">
+  {csrf}
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:18px;">
+
+    <div class="card">
+      <h2 style="margin-bottom:16px;">Classification</h2>
+      <div class="form-group">
+        <label for="prompt_type">Prompt Type</label>
+        <select id="prompt_type" name="prompt_type">{type_opts}</select>
+      </div>
+      <div class="form-group">
+        <label for="parent_prompt">Parent Prompt</label>
+        <select id="parent_prompt" name="parent_prompt_id">{parent_opts}</select>
+        <p class="text-muted" style="font-size:.76rem;margin-top:5px;">
+          Set a parent to place this prompt in the hierarchy tree.
+        </p>
+      </div>
+      <div class="form-group">
+        <label for="sensitivity">Sensitivity</label>
+        <select id="sensitivity" name="sensitivity">{sens_opts}</select>
+      </div>
+      <div class="form-group">
+        <label for="feature_area">Feature Area</label>
+        <input type="text" id="feature_area" name="feature_area"
+               value="{_escape(meta.get('feature_area') or '')}"
+               placeholder="e.g. onboarding, support-chat, email-generation">
+      </div>
+      <div class="form-group">
+        <label for="owner">Owner / Team</label>
+        <input type="text" id="owner" name="owner"
+               value="{_escape(meta.get('owner') or '')}"
+               placeholder="e.g. platform-team">
+      </div>
+    </div>
+
+    <div class="card">
+      <h2 style="margin-bottom:16px;">Documentation</h2>
+      <div class="form-group">
+        <label for="purpose">Purpose <span class="text-muted" style="font-weight:400;">(one sentence)</span></label>
+        <input type="text" id="purpose" name="purpose"
+               value="{_escape(meta.get('purpose') or '')}"
+               placeholder="What does this prompt do?">
+      </div>
+      <div class="form-group">
+        <label for="called_from">Called From</label>
+        <input type="text" id="called_from" name="called_from"
+               value="{_escape(meta.get('called_from') or '')}"
+               placeholder="e.g. routes/chat.py, GET /api/summarize">
+      </div>
+      <div class="form-group">
+        <label for="model_used">Model Used</label>
+        <input type="text" id="model_used" name="model_used"
+               value="{_escape(meta.get('model_used') or '')}"
+               placeholder="e.g. gpt-4o, temperature=0.7">
+      </div>
+      <div class="form-group">
+        <label for="input_variables">Input Variables <span class="text-muted" style="font-weight:400;">(comma-separated)</span></label>
+        <input type="text" id="input_variables" name="input_variables"
+               value="{_escape(meta.get('input_variables') or '')}"
+               placeholder="e.g. user_name, context, tone">
+      </div>
+      <div class="form-group">
+        <label for="notes">Notes</label>
+        <textarea id="notes" name="notes" rows="4"
+                  placeholder="Any design decisions, gotchas, or context future editors should know.">{_escape(meta.get('notes') or '')}</textarea>
+      </div>
+    </div>
+
+  </div>
+
+  <div class="flex mt-16">
+    <button type="submit" class="btn btn-primary">Save Metadata</button>
+    <a href="{base}/detail/{_escape(name)}" class="btn btn-ghost">Cancel</a>
+  </div>
+</form>"""
+
+    return _layout(f"Metadata: {name}", body, protected, base, user)
+
+
+def changelog_page(
+    name: str,
+    changelog: list,
+    versions: list,
+    protected: bool = False,
+    base: str = "",
+    user: Optional[dict] = None,
+    csrf_token: Optional[str] = None,
+    success: Optional[str] = None,
+) -> str:
+    csrf = _csrf_field(csrf_token)
+    succ_div = f'<div class="success">{_escape(success)}</div>' if success else ""
+
+    # Build version map for quick lookup
+    version_map = {v["id"]: v for v in versions}
+    changelog_by_vid = {c["version_id"]: c for c in changelog}
+
+    rows = ""
+    for v in versions:
+        v_id = v["id"]
+        v_num = v["version_number"]
+        is_active = v.get("is_active")
+        created_by = _escape(v.get("created_by") or "-")
+        created_at = _escape(v.get("created_at") or "-")
+        act_badge = '<span class="badge badge-active" style="margin-left:6px;">ACTIVE</span>' if is_active else ""
+
+        cl = changelog_by_vid.get(v_id)
+        if cl:
+            gen_label = "✨ auto" if cl.get("generated_by") == "pivot" else "✍ manual"
+            entry_html = f"""
+            <div style="background:rgba(10,20,36,.5);border:1px solid var(--line-soft);
+                        border-radius:8px;padding:12px 14px;margin-top:8px;">
+              <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+                <span style="font-size:.72rem;color:var(--muted);">{gen_label} · {_escape(cl.get('created_by') or '')} · {_escape(cl.get('created_at') or '')}</span>
+                <a href="{base}/changelog/{_escape(name)}/edit/{v_id}" class="btn btn-ghost btn-sm">Edit</a>
+              </div>
+              <pre style="font-size:.84rem;color:var(--muted-strong);white-space:pre-wrap;">{_escape(cl.get('entry') or '')}</pre>
+            </div>"""
+        else:
+            entry_html = f"""
+            <div style="margin-top:8px;">
+              <span class="text-muted" style="font-size:.82rem;font-style:italic;">No changelog entry.</span>
+              <a href="{base}/changelog/{_escape(name)}/edit/{v_id}" class="btn btn-ghost btn-sm" style="margin-left:8px;">+ Add Entry</a>
+            </div>"""
+
+        rows += f"""
+        <div class="card" style="margin-bottom:12px;">
+          <div class="flex-between">
+            <div>
+              <strong style="font-size:.95rem;">v{v_num}</strong>{act_badge}
+              <span class="text-muted" style="font-size:.82rem;margin-left:10px;">{created_by} · {created_at}</span>
+            </div>
+          </div>
+          {entry_html}
+        </div>"""
+
+    if not rows:
+        rows = '<div class="card"><p class="text-muted" style="text-align:center;padding:20px;">No versions yet.</p></div>'
+
+    body = f"""
+<div class="flex-between" style="margin-bottom:20px;">
+  <div>
+    <h1>Changelog: <span style="color:var(--accent);">{_escape(name)}</span></h1>
+    <p class="text-muted" style="font-size:.88rem;margin-top:4px;">
+      History of why each version was created.
+    </p>
+  </div>
+  <a href="{base}/detail/{_escape(name)}" class="btn btn-ghost">← Back to Detail</a>
+</div>
+{succ_div}
+{rows}"""
+
+    return _layout(f"Changelog: {name}", body, protected, base, user)
+
+
+def changelog_edit_page(
+    name: str,
+    version_id: Any,
+    version_number: int,
+    existing_entry: str,
+    protected: bool = False,
+    base: str = "",
+    user: Optional[dict] = None,
+    csrf_token: Optional[str] = None,
+) -> str:
+    csrf = _csrf_field(csrf_token)
+
+    body = f"""
+<div class="flex-between" style="margin-bottom:20px;">
+  <h1>Edit Changelog: <span style="color:var(--accent);">{_escape(name)}</span> v{version_number}</h1>
+  <a href="{base}/changelog/{_escape(name)}" class="btn btn-ghost">← Cancel</a>
+</div>
+<div class="card">
+  <form method="post" action="{base}/changelog/{_escape(name)}/edit/{_escape(str(version_id))}">
+    {csrf}
+    <div class="form-group">
+      <label for="entry">Changelog Entry</label>
+      <textarea id="entry" name="entry" rows="8"
+                placeholder="What changed in this version and why? What is the expected impact?">{_escape(existing_entry)}</textarea>
+    </div>
+    <div class="flex mt-16">
+      <button type="submit" class="btn btn-primary">Save Entry</button>
+      <a href="{base}/changelog/{_escape(name)}" class="btn btn-ghost">Cancel</a>
+    </div>
+  </form>
+</div>"""
+
+    return _layout(f"Edit Changelog: {name} v{version_number}", body, protected, base, user)
+
+
+def app_context_page(
+    context_doc: Optional[dict],
+    protected: bool = False,
+    base: str = "",
+    user: Optional[dict] = None,
+    csrf_token: Optional[str] = None,
+    success: Optional[str] = None,
+    error: Optional[str] = None,
+) -> str:
+    csrf = _csrf_field(csrf_token)
+    err_div = f'<div class="error">{_escape(error)}</div>' if error else ""
+    succ_div = f'<div class="success">{_escape(success)}</div>' if success else ""
+    content = context_doc.get("content", "") if context_doc else ""
+    version = context_doc.get("version", 0) if context_doc else 0
+    updated_by = context_doc.get("created_by", "") if context_doc else ""
+    updated_at = context_doc.get("created_at", "") if context_doc else ""
+
+    version_info = ""
+    if version:
+        version_info = f'<p class="text-muted" style="font-size:.8rem;margin-top:4px;">v{version} · saved by {_escape(updated_by)} · {_escape(updated_at)}</p>'
+
+    placeholder = """# Application Context
+
+## What this application does
+(Describe your application in 1–2 paragraphs.)
+
+## Agents & their roles
+- **agent_name**: What this agent does and when it's invoked.
+
+## Prompt call patterns
+- `prompt_name` → called from `route/file.py` when X happens.
+
+## Domain vocabulary & constraints
+- Always refer to users as "members".
+- Tone: direct but warm.
+
+## Model configuration
+- Default model: gpt-4o, temperature 0.7
+- Tool calling: enabled for support_agent
+"""
+
+    body = f"""
+<div class="flex-between" style="margin-bottom:20px;">
+  <div>
+    <h1>Application Context</h1>
+    <p class="text-muted" style="font-size:.88rem;margin-top:4px;">
+      Describe your application once. Pivot reads this as its background knowledge on every analysis.
+    </p>
+    {version_info}
+  </div>
+</div>
+
+{err_div}{succ_div}
+
+<div style="display:grid;grid-template-columns:1fr 420px;gap:20px;align-items:start;">
+
+  <div class="card">
+    <form method="post" action="{base}/context">
+      {csrf}
+      <div class="form-group">
+        <label for="content">Context Document <span class="text-muted" style="font-weight:400;">(Markdown)</span></label>
+        <textarea id="content" name="content" rows="28"
+                  placeholder="{_escape(placeholder)}">{_escape(content)}</textarea>
+      </div>
+      <div class="flex mt-16">
+        <button type="submit" class="btn btn-primary">Save Context</button>
+      </div>
+    </form>
+  </div>
+
+  <div>
+    <div class="card">
+      <h2 style="margin-bottom:12px;">What to include</h2>
+      <ul style="list-style:none;padding:0;display:flex;flex-direction:column;gap:10px;">
+        <li style="display:flex;gap:10px;font-size:.84rem;color:var(--muted-strong);">
+          <span style="color:var(--accent);flex-shrink:0;">→</span>
+          What your app does (1–2 sentences)
+        </li>
+        <li style="display:flex;gap:10px;font-size:.84rem;color:var(--muted-strong);">
+          <span style="color:var(--accent);flex-shrink:0;">→</span>
+          Each agent's name, purpose, and when it's used
+        </li>
+        <li style="display:flex;gap:10px;font-size:.84rem;color:var(--muted-strong);">
+          <span style="color:var(--accent);flex-shrink:0;">→</span>
+          Which routes or files call which prompts
+        </li>
+        <li style="display:flex;gap:10px;font-size:.84rem;color:var(--muted-strong);">
+          <span style="color:var(--accent);flex-shrink:0;">→</span>
+          Tone, brand voice, domain vocabulary rules
+        </li>
+        <li style="display:flex;gap:10px;font-size:.84rem;color:var(--muted-strong);">
+          <span style="color:var(--accent);flex-shrink:0;">→</span>
+          Default model, temperature, tool-calling patterns
+        </li>
+      </ul>
+    </div>
+    <div class="card" style="margin-top:16px;background:rgba(145,200,255,.04);border-color:rgba(145,200,255,.12);">
+      <p style="font-size:.82rem;color:#8ab4d4;line-height:1.6;">
+        Pivot reads this document before every suggestion, changelog generation,
+        and consistency check — so the more detail you add, the more accurate
+        and useful its analysis will be.
+      </p>
+    </div>
+  </div>
+
+</div>"""
+
+    return _layout("Application Context", body, protected, base, user)
+
+
+def tree_page(
+    prompts: list,
+    protected: bool = False,
+    base: str = "",
+    user: Optional[dict] = None,
+) -> str:
+    """Render a full hierarchy tree of all prompts."""
+
+    # Build index: id → prompt, children: parent_name → [children]
+    by_name: Dict[str, Any] = {p["name"]: p for p in prompts}
+    children_map: Dict[str, list] = {}
+    roots: list = []
+
+    for p in prompts:
+        parent_name = p.get("parent_name")
+        if parent_name and parent_name in by_name:
+            children_map.setdefault(parent_name, []).append(p)
+        else:
+            roots.append(p)
+
+    def _render_node(p: dict, depth: int = 0) -> str:
+        pname = p["name"]
+        ptype = p.get("prompt_type") or "unclassified"
+        purpose = p.get("purpose") or ""
+        active_v = p.get("active_version")
+        v_str = f"v{active_v}" if active_v else '<span class="text-muted">no active</span>'
+        indent = depth * 28
+        children = children_map.get(pname, [])
+        chevron = "▾" if children else "·"
+
+        node_html = f"""
+<div style="margin-left:{indent}px;margin-bottom:4px;">
+  <div style="display:flex;align-items:center;gap:10px;padding:10px 14px;
+              background:rgba(15,25,42,.7);border:1px solid var(--line-soft);
+              border-radius:9px;transition:background .14s;">
+    <span style="color:var(--muted);font-size:.8rem;width:12px;flex-shrink:0;">{chevron}</span>
+    <a href="{base}/detail/{_escape(pname)}" style="font-weight:600;font-size:.9rem;flex:1;min-width:0;
+       overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{_escape(pname)}</a>
+    {_type_badge(ptype)}
+    <span style="font-size:.78rem;color:var(--muted);flex-shrink:0;">{v_str}</span>
+    {"<span style='font-size:.78rem;color:var(--muted);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;'>" + _escape(purpose[:60]) + ("…" if len(purpose) > 60 else "") + "</span>" if purpose else ""}
+    <div style="display:flex;gap:6px;flex-shrink:0;">
+      <a href="{base}/edit/{_escape(pname)}" class="btn btn-ghost btn-sm">Edit</a>
+      <a href="{base}/metadata/{_escape(pname)}" class="btn btn-ghost btn-sm">Meta</a>
+    </div>
+  </div>
+  {"".join(_render_node(c, depth + 1) for c in sorted(children, key=lambda x: x["name"]))}
+</div>"""
+        return node_html
+
+    tree_html = "".join(_render_node(p) for p in sorted(roots, key=lambda x: (x.get("prompt_type") or "z", x["name"])))
+
+    if not prompts:
+        tree_html = '<div class="card"><p class="text-muted" style="text-align:center;padding:32px;">No prompts yet. <a href="' + base + '/edit/__new__">Create one</a>.</p></div>'
+
+    # Stats bar
+    total = len(prompts)
+    agents = sum(1 for p in prompts if p.get("prompt_type") == "agent")
+    tools = sum(1 for p in prompts if p.get("prompt_type") == "tool")
+    unclassified = sum(1 for p in prompts if not p.get("prompt_type") or p.get("prompt_type") == "unclassified")
+
+    body = f"""
+<div class="flex-between" style="margin-bottom:20px;">
+  <div>
+    <h1>Prompt Hierarchy</h1>
+    <p class="text-muted" style="font-size:.88rem;margin-top:4px;">
+      All prompts organised by parent-child relationship.
+    </p>
+  </div>
+  <div class="flex">
+    <a href="{base}/list" class="btn btn-ghost">Flat List</a>
+    <a href="{base}/edit/__new__" class="btn btn-primary">+ New Prompt</a>
+  </div>
+</div>
+
+<div style="display:flex;gap:12px;margin-bottom:20px;flex-wrap:wrap;">
+  <div class="card" style="padding:12px 18px;flex:1;min-width:120px;text-align:center;">
+    <div style="font-size:1.4rem;font-weight:720;color:var(--accent);">{total}</div>
+    <div style="font-size:.76rem;color:var(--muted);margin-top:2px;">Total</div>
+  </div>
+  <div class="card" style="padding:12px 18px;flex:1;min-width:120px;text-align:center;">
+    <div style="font-size:1.4rem;font-weight:720;color:#91e0b8;">{agents}</div>
+    <div style="font-size:.76rem;color:var(--muted);margin-top:2px;">Agents</div>
+  </div>
+  <div class="card" style="padding:12px 18px;flex:1;min-width:120px;text-align:center;">
+    <div style="font-size:1.4rem;font-weight:720;color:#f2cb82;">{tools}</div>
+    <div style="font-size:.76rem;color:var(--muted);margin-top:2px;">Tools</div>
+  </div>
+  <div class="card" style="padding:12px 18px;flex:1;min-width:120px;text-align:center;">
+    <div style="font-size:1.4rem;font-weight:720;color:#8fa1b8;">{unclassified}</div>
+    <div style="font-size:.76rem;color:var(--muted);margin-top:2px;">Unclassified</div>
+  </div>
+</div>
+
+<div>{tree_html}</div>"""
+
+    return _layout("Prompt Hierarchy", body, protected, base, user)
+
+
+def _hierarchy_warning_panel(children: list, base: str, parent_name: str) -> str:
+    """Renders the yellow hierarchy warning panel shown on the edit page when a prompt has children."""
+    if not children:
+        return ""
+    child_links = "".join(
+        f'<a href="{base}/detail/{_escape(c["name"])}" style="margin-right:8px;font-size:.82rem;">'
+        f'{_escape(c["name"])} <span class="text-muted">({_escape(c.get("prompt_type") or "unclassified")})</span></a>'
+        for c in children
+    )
+    return f"""
+<div style="background:rgba(242,205,143,.07);border:1px solid rgba(242,205,143,.22);
+            border-radius:10px;padding:14px 18px;margin-bottom:18px;">
+  <div style="display:flex;align-items:flex-start;gap:12px;">
+    <span style="font-size:1.1rem;flex-shrink:0;">⚠</span>
+    <div>
+      <strong style="color:var(--warning);font-size:.88rem;">
+        This prompt has {len(children)} child prompt{"s" if len(children) != 1 else ""}.
+      </strong>
+      <p style="color:#c9a85a;font-size:.82rem;margin-top:4px;margin-bottom:8px;">
+        Changes here may affect the behaviour of dependent prompts.
+        Review them before activating this version.
+      </p>
+      <div style="display:flex;flex-wrap:wrap;gap:4px;">{child_links}</div>
+    </div>
+  </div>
+</div>"""

@@ -3,6 +3,7 @@ import json
 import os
 import tempfile
 import unittest
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from fastapi import FastAPI
@@ -13,6 +14,22 @@ from llmpivot.auth import generate_csrf_token
 from llmpivot.storage import MongoStorage
 
 SECRET = "dynamic-test-secret"
+
+
+def _make_test_client(manager: PromptManager) -> TestClient:
+    """Wrap manager in a FastAPI app with a parent lifespan so _bootstrap_admin runs."""
+
+    @asynccontextmanager
+    async def _lifespan(app):
+        await manager._bootstrap_admin()
+        manager.cache.start()
+        manager.usage_logger.start()
+        yield
+        await manager._shutdown()
+
+    app = FastAPI(lifespan=_lifespan)
+    app.mount("/prompts", manager.mount_ui())
+    return TestClient(app, follow_redirects=False)
 
 
 class DynamicConcurrencyAndEndToEndTests(unittest.TestCase):
@@ -30,25 +47,27 @@ class DynamicConcurrencyAndEndToEndTests(unittest.TestCase):
             bootstrap_password="admin",
         )
 
-        self.app = FastAPI()
-        self.app.mount("/prompts", self.manager.mount_ui())
-        self.client = TestClient(self.app, follow_redirects=False)
+        self._client_ctx = _make_test_client(self.manager)
+        self.client = self._client_ctx.__enter__()
 
     def tearDown(self):
+        try:
+            self._client_ctx.__exit__(None, None, None)
+        except Exception:
+            pass
         self.tmp_dir.cleanup()
 
     def _login(self):
         """Log in as admin and return (cookies_dict, csrf_token)."""
-        asyncio.run(self.manager._bootstrap_admin())
         res = self.client.post("/prompts/login", data={"username": "admin", "password": "admin"})
-        self.assertEqual(res.status_code, 303)
+        self.assertEqual(res.status_code, 303, f"Login failed: {res.text[:200]}")
         session_cookie = res.cookies["llmpivot_session"]
         cookies = {"llmpivot_session": session_cookie}
         csrf = generate_csrf_token(session_cookie, SECRET)
         return cookies, csrf
 
     def test_concurrent_multi_user_traffic(self):
-        """Simulate 50 concurrent requests fetching prompts and logging usage under heavy load."""
+        """Simulate concurrent requests fetching prompts and logging usage under load."""
         async def run_stress_test():
             await self.manager.storage.create_version(
                 name="rag_system_prompt",
@@ -86,7 +105,10 @@ class DynamicConcurrencyAndEndToEndTests(unittest.TestCase):
             tasks.append(admin_updater())
             await asyncio.gather(*tasks)
 
+            # Start the logger on this event loop and flush synchronously
+            self.manager.usage_logger.start()
             await asyncio.sleep(0.5)
+            await self.manager.usage_logger.drain()
 
             logs = await self.manager.storage.fetch_logs("rag_system_prompt", limit=100, tenant_id="org_dynamic")
             self.assertGreaterEqual(len(logs), 40)
