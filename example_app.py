@@ -5,6 +5,7 @@ Run locally:
     uvicorn example_app:app --reload
 
 Then open: http://localhost:8000/prompts/list
+Agent Skills: http://localhost:8000/prompts/skills
 Login with: admin / changeme  (change the password immediately after first login)
 
 Environment variables (put in .env or export directly):
@@ -21,7 +22,7 @@ Environment variables (put in .env or export directly):
 
   llmpivot:
     LLMPIVOT_SECRET   — HMAC signing key for session cookies (required in production)
-    LLMPIVOT_DB       — path to the SQLite database file (default: prompts.db)
+    LLMPIVOT_DB       — path to the SQLite database file (default: instruction_studio.db)
     LLMPIVOT_PASSWORD — initial admin bootstrap password (default: changeme)
 """
 
@@ -32,9 +33,9 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from llmpivot import (
-    PromptManager,
+    LLMAssetManager,
     PromptNotFoundError,
-    aget_prompt_with_fallback,
+    aget_prompt_with_meta,
     log_prompt_usage,
 )
 
@@ -62,7 +63,7 @@ _load_dotenv()
 
 def _resolve_llm() -> dict:
     """
-    Returns a dict of keyword args to pass directly to PromptManager.
+    Returns a dict of keyword args to pass directly to LLMAssetManager.
 
     Azure OpenAI takes precedence when AZURE_OPENAI_ENDPOINT is set.
     The URL is built from endpoint + deployment + api-version so callers
@@ -109,14 +110,14 @@ _llm_kwargs = _resolve_llm()
 # ---------------------------------------------------------------------------
 
 SECRET_KEY         = os.environ.get("LLMPIVOT_SECRET", secrets.token_hex(32))
-DB_PATH            = os.environ.get("LLMPIVOT_DB", "prompts.db")
+DB_PATH            = os.environ.get("LLMPIVOT_DB", "instruction_studio.db")
 BOOTSTRAP_PASSWORD = os.environ.get("LLMPIVOT_PASSWORD", "changeme")
 
 # ---------------------------------------------------------------------------
-# PromptManager — initialise once at module level
+# LLMAssetManager — initialise once at module level
 # ---------------------------------------------------------------------------
 
-manager = PromptManager(
+manager = LLMAssetManager(
     # --- storage ---
     db_path=DB_PATH,
     cache_ttl=5,
@@ -147,6 +148,7 @@ manager = PromptManager(
     pivot_enabled=True,         # show the floating Assistant widget
     pivot_proactive=True,       # auto-analyse the current page
     auto_changelog=True,        # auto-generate changelog on every version save
+    skill_loading_mode="progressive",  # load skill descriptions first, then instructions on demand
 
     # --- Fallback snapshot ---
     fallback_snapshot=True,     # write prompts_fallback.json on every activation
@@ -158,7 +160,7 @@ manager = PromptManager(
 
 app = FastAPI(
     title="My LLM App",
-    description="Powered by llmpivot for runtime prompt management.",
+    description="Example app using versioned prompts and Agent Skills.",
 )
 
 @app.exception_handler(PromptNotFoundError)
@@ -176,14 +178,17 @@ app.mount("/prompts", manager.mount_ui())
 # ---------------------------------------------------------------------------
 
 @app.get("/summarize")
-async def summarize(text: str = "hello world"):
+async def summarize(prompt_name: str, text: str = "hello world"):
     """
     Example route using a managed prompt.
-    Falls back to prompts_fallback.json if the DB is unreachable.
+    Uses the active version so the request can be attributed in usage logs.
     """
-    content = await aget_prompt_with_fallback("summarize_prompt")
+    meta = await aget_prompt_with_meta(prompt_name)
+    content = meta["content"]
     llm_output = f"[LLM output for: '{text[:60]}' using prompt: '{content[:40]}...']"
-    return {"prompt_preview": content[:80], "output": llm_output}
+    log_prompt_usage(prompt_name, meta["version_id"], text, llm_output)
+    await manager.usage_logger.flush()
+    return {"prompt_name": prompt_name, "version_id": meta["version_id"], "prompt_preview": content[:80], "output": llm_output}
 
 
 @app.get("/health")

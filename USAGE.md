@@ -10,6 +10,7 @@ Step-by-step instructions for every scenario, from local dev to production deplo
 2. [Running the example app](#2-running-the-example-app)
 3. [Creating your first prompt](#3-creating-your-first-prompt)
 4. [Using prompts in your application](#4-using-prompts-in-your-application)
+   - [Agent Skills and progressive loading](#agent-skills-and-progressive-loading)
 5. [Fallback snapshot](#5-fallback-snapshot)
 6. [Prompt hierarchy](#6-prompt-hierarchy)
 7. [Prompt metadata](#7-prompt-metadata)
@@ -109,9 +110,9 @@ export LLMPIVOT_SECRET=$(python -c "import secrets; print(secrets.token_hex(32))
 
 ```python
 import asyncio
-from llmpivot import PromptManager
+from llmpivot import LLMAssetManager
 
-manager = PromptManager(db_path="prompts.db", auth_mode="disabled")
+manager = LLMAssetManager(db_path="prompts.db", auth_mode="disabled")
 
 async def seed():
     await manager.storage.create_version(
@@ -171,6 +172,26 @@ async def _handler(request, exc):
 
 ---
 
+## Agent Skills and progressive loading
+
+LLM Pivot manages Agent Skills as first-class, versioned instruction assets alongside prompts. Open **Skills** in the UI to create a `SKILL.md`, add Markdown reference files, import or export a portable ZIP, save versions, tag releases, compare versions, run the same task against two versions, and activate the selected version. SQLite and MongoDB keep skill versions and changelogs separate from prompt records.
+
+Use the library API to load only the context your agent needs:
+
+```python
+from llmpivot import alist_skills, aget_skill, aget_skill_reference
+
+catalog = await alist_skills()  # active names and descriptions only
+skill = await aget_skill("release-review")  # one active SKILL.md
+policy = await aget_skill_reference("release-review", "references/policy.md")
+```
+
+For frameworks that support function tools, `manager.skill_tool_schemas()` exposes `list_skills`, `get_skill`, and `get_skill_reference`; dispatch calls with `await manager.call_skill_tool(name, arguments)`. This progressive flow sends descriptions first, then loads one selected instruction file, then any requested reference. Pivot uses progressive loading by default. Set `skill_loading_mode="eager"` to include every active skill and reference in each Pivot request.
+
+The bundle format supports standard `SKILL.md` frontmatter and Markdown files under `references/`. Bundled scripts and binary assets are rejected and never executed. New applications should construct `LLMAssetManager`; the former `PromptManager` name remains as an import-compatible alias.
+
+---
+
 ## 5. Fallback snapshot
 
 llmpivot writes `prompts_fallback.json` next to your database file every time a version is activated and on startup. The file contains only the currently active content — no history, no metadata:
@@ -196,7 +217,7 @@ This raises `PromptNotFoundError` only if the prompt is absent from both the liv
 **Configuration:**
 
 ```python
-PromptManager(
+LLMAssetManager(
     fallback_snapshot=True,          # default — set False to disable writes
     fallback_path="/custom/path.json",  # default: same dir as db_path
 )
@@ -319,7 +340,7 @@ The Assistant never saves anything without showing you a diff and getting an exp
 
 **Configuration:**
 ```python
-PromptManager(
+LLMAssetManager(
     pivot_enabled=True,      # show the widget
     pivot_proactive=True,    # auto-analyse current page (False = chat-only)
     auto_changelog=True,     # generate changelog on save (requires LLM)
@@ -336,7 +357,7 @@ Set `pivot_enabled=False` to completely disable the widget — no rendering, no 
 ### Standard OpenAI
 
 ```python
-PromptManager(
+LLMAssetManager(
     llm_url="https://api.openai.com/v1/chat/completions",
     llm_api_key=os.environ["OPENAI_API_KEY"],
     llm_model="gpt-4o",
@@ -346,7 +367,7 @@ PromptManager(
 ### Azure OpenAI
 
 ```python
-PromptManager(
+LLMAssetManager(
     llm_url="https://myresource.openai.azure.com/openai/deployments/gpt-4o/chat/completions?api-version=2024-08-01-preview",
     llm_api_key=os.environ["AZURE_OPENAI_API_KEY"],
     llm_model="gpt-4o",
@@ -363,7 +384,7 @@ llmpivot inspects the model name and automatically picks the correct token limit
 You can always override:
 
 ```python
-PromptManager(
+LLMAssetManager(
     llm_max_completion_tokens=1024,   # explicit override for new-gen models
     # llm_max_tokens=1024,            # explicit override for older models
 )
@@ -372,7 +393,7 @@ PromptManager(
 ### Temperature and other params
 
 ```python
-PromptManager(
+LLMAssetManager(
     llm_temperature=0.7,              # omit entirely if None (new-gen models reject it)
     llm_top_p=0.95,
     llm_timeout=60.0,
@@ -385,7 +406,7 @@ PromptManager(
 ### Any OpenAI-compatible endpoint
 
 ```python
-PromptManager(
+LLMAssetManager(
     llm_url="http://localhost:11434/v1/chat/completions",  # Ollama
     llm_api_key="ollama",
     llm_model="llama3.2",
@@ -460,11 +481,11 @@ await manager.storage.create_user(
 Each `tenant_id` is fully isolated. Prompts, versions, logs, and users from one tenant are invisible to another.
 
 ```python
-manager_a = PromptManager(db_path="prompts.db", tenant_id="org_acme")
-manager_b = PromptManager(db_path="prompts.db", tenant_id="org_globex")
+manager_a = LLMAssetManager(db_path="prompts.db", tenant_id="org_acme")
+manager_b = LLMAssetManager(db_path="prompts.db", tenant_id="org_globex")
 ```
 
-> Only the last `PromptManager(...)` sets the global `_instance`. For multiple tenants in one process, call `manager.get_with_meta()` directly instead of using module-level helpers.
+> Only the last `LLMAssetManager(...)` sets the global `_instance`. For multiple tenants in one process, call `manager.get_with_meta()` directly instead of using module-level helpers.
 
 ---
 
@@ -475,7 +496,7 @@ pip install "llmpivot[mongo]"
 ```
 
 ```python
-manager = PromptManager(
+manager = LLMAssetManager(
     storage_type="mongodb",
     mongo_uri="mongodb://localhost:27017",
     mongo_db_name="llmpivot_prod",
@@ -600,7 +621,7 @@ livenessProbe:
 ## 21. Production deployment
 
 ```python
-manager = PromptManager(
+manager = LLMAssetManager(
     db_path=os.environ.get("LLMPIVOT_DB", "/data/prompts.db"),
     cache_ttl=5,
     auth_mode="rbac",
@@ -638,21 +659,21 @@ uvicorn myapp:app --workers 4 --host 0.0.0.0 --port 8000
 
 ## 22. Upgrading from an older version
 
-**New tables** (`prompt_metadata`, `prompt_changelog`, `app_context`, `pivot_observations`, `pivot_conversations`) are created automatically on first startup. No manual migration needed.
+**New tables** (`prompt_metadata`, `prompt_changelog`, `app_context`, `pivot_observations`, `pivot_conversations`, `skills`, `skill_versions`, `skill_changelog`) are created automatically on first startup. No manual migration needed.
 
 **If you have existing data with missing `tenant_id` values:**
 
 ```python
 import asyncio
-from llmpivot import PromptManager
+from llmpivot import LLMAssetManager
 
-manager = PromptManager(db_path="prompts.db")
+manager = LLMAssetManager(db_path="prompts.db")
 result = asyncio.run(manager.storage.migrate_missing_tenant_ids(tenant_id="default"))
 print(result)  # {"prompts": N, "prompt_versions": N, "users": N}
 ```
 
 **`secret_key` now required for `auth_mode="rbac"`** — omitting it raises `ValueError`. Set `secret_key=os.environ["LLMPIVOT_SECRET"]`.
 
-**New `PromptManager` LLM params** — `llm_url`, `llm_api_key`, `llm_model` remain unchanged. New optional params (`llm_api_type`, `llm_max_tokens`, `llm_temperature`, etc.) all default to `None` (auto-detect). Existing configurations work without changes.
+**New `LLMAssetManager` LLM params** — `llm_url`, `llm_api_key`, `llm_model` remain unchanged. New optional params (`llm_api_type`, `llm_max_tokens`, `llm_temperature`, etc.) all default to `None` (auto-detect). Existing configurations work without changes.
 
 **`pivot_enabled` defaults to `False`** — the Assistant widget does not appear unless you opt in.

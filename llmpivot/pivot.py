@@ -22,7 +22,7 @@ import time
 from typing import AsyncGenerator, Dict, Any, List, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from .manager import PromptManager
+    from .manager import LLMAssetManager
 
 logger = logging.getLogger("llmpivot.pivot")
 
@@ -44,10 +44,12 @@ def _obs(obs_type: str, content: str, action: Optional[Dict] = None) -> Dict[str
 # ---------------------------------------------------------------------------
 
 _PIVOT_SYSTEM = """\
-You are Assistant, an intelligent helper embedded inside Prompt Manager, a runtime prompt management system.
+You are Assistant, an intelligent helper embedded inside Instruction Studio, a runtime prompt and agent skill management system.
 
-You have access to tools that let you read prompts, their metadata, version history, usage statistics,
-the application context document, and the prompt hierarchy. You can suggest edits (as diffs) but you
+You have access to tools that let you read prompts, versioned Agent Skills, metadata, version history,
+usage statistics, the application context document, and the prompt hierarchy. In progressive skill mode,
+call list_skills to inspect short descriptions, get_skill to load only the matching SKILL.md, and
+get_skill_reference to read a specific reference only when the skill requests it. You can suggest edits (as diffs) but you
 NEVER save changes without the user explicitly confirming.
 
 Your role:
@@ -133,6 +135,41 @@ _TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "list_skills",
+            "description": "List active Agent Skills by name and short description, without loading their instructions.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_skill",
+            "description": "Load the active SKILL.md instructions for one named skill.",
+            "parameters": {
+                "type": "object",
+                "properties": {"name": {"type": "string", "description": "Skill slug"}},
+                "required": ["name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_skill_reference",
+            "description": "Load one Markdown reference under references/ from a named skill.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Skill slug"},
+                    "path": {"type": "string", "description": "Relative path under references/"},
+                },
+                "required": ["name", "path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "list_all_prompts",
             "description": "List all prompts with their type, purpose, and hierarchy.",
             "parameters": {"type": "object", "properties": {}, "required": []},
@@ -169,7 +206,7 @@ class PivotAgent:
     at the start of each request and persisted at the end.
     """
 
-    def __init__(self, manager: "PromptManager"):
+    def __init__(self, manager: "LLMAssetManager"):
         self.manager = manager
 
     # ------------------------------------------------------------------
@@ -310,7 +347,7 @@ class PivotAgent:
         if not self.manager.llm:
             yield "data: " + json.dumps({
                 "type": "error",
-                "content": "LLM is not configured. Set llm_url in PromptManager to enable chat."
+                "content": "LLM is not configured. Set llm_url in LLMAssetManager to enable chat."
             }) + "\n\n"
             return
 
@@ -328,6 +365,18 @@ class PivotAgent:
         ctx_prefix += "]"
 
         full_message = f"{ctx_prefix}\n\n{message}"
+
+        if self.manager.skill_loading_mode == "eager":
+            skill_blocks = []
+            for skill in await self.manager.list_skills():
+                loaded = await self.manager.get_skill(skill["name"], include_references=True)
+                references = loaded.pop("reference_content", {})
+                block = f"## Skill: {loaded['name']}\n{loaded['content']}"
+                for path, content in references.items():
+                    block += f"\n\n### {path}\n{content}"
+                skill_blocks.append(block)
+            if skill_blocks:
+                full_message = "Available skill instructions (eager mode):\n\n" + "\n\n".join(skill_blocks) + "\n\n" + full_message
 
         # Persist user turn
         await self.manager.storage.save_conversation_turn(
@@ -426,6 +475,9 @@ class PivotAgent:
                 "version": active["version_number"],
                 "metadata": meta,
             }, indent=2)
+
+        elif name in ("list_skills", "get_skill", "get_skill_reference"):
+            return await mgr.call_skill_tool(name, args)
 
         elif name == "get_hierarchy":
             prompt_name = args.get("name", "")

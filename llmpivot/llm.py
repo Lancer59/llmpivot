@@ -17,7 +17,7 @@ Token limit params:
 Auto-detection of new-gen models:
   If neither max_tokens nor max_completion_tokens is set explicitly, the client
   inspects the model name and chooses the right field automatically. This can
-  always be overridden via llm_max_tokens or llm_max_completion_tokens in PromptManager.
+  always be overridden via llm_max_tokens or llm_max_completion_tokens in LLMAssetManager.
 
 Production notes:
 - Retries up to 3 times with exponential backoff on transient errors (5xx, timeout, connection).

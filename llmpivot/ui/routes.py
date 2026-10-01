@@ -1,9 +1,9 @@
 """
-FastAPI router for the Prompt Manager UI.
+FastAPI router for the LLM Pivot UI.
 Supports Auth & RBAC session management, multi-tenancy, and pluggable storage engines.
 
 Production hardening in this version:
-- cookie_secure passed from PromptManager (defaults True).
+- cookie_secure passed from LLMAssetManager (defaults True).
 - CSRF token generated at login and validated on every state-mutating POST.
 - Login rate limiting: max 10 attempts per IP per 5-minute window; 15-minute lockout.
 - Input size limits: prompt content capped at 500 KB, log text at 10 KB.
@@ -15,7 +15,7 @@ import time
 from collections import defaultdict
 from typing import Optional, TYPE_CHECKING
 from fastapi import APIRouter, Form, Request, UploadFile, File
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse, Response
 import asyncio
 
 try:
@@ -49,11 +49,21 @@ from .templates import (
     app_context_page,
     tree_page,
     pivot_widget_html,
+    skills_page,
+    skill_edit_page,
+    skill_import_page,
+    skill_detail_page,
+    skill_diff_page,
+    skill_test_page,
 )
 from .helpers import escape as _escape
+from ..skills import (
+    MAX_SKILL_BUNDLE_BYTES, SKILL_CHANGELOG_MARKER, SkillValidationError, decode_skill, encode_skill,
+    normalize_skill_files, parse_skill_markdown, skill_from_zip,
+)
 
 if TYPE_CHECKING:
-    from ..manager import PromptManager
+    from ..manager import LLMAssetManager
 
 # ---------------------------------------------------------------------------
 # Input size constants
@@ -61,6 +71,7 @@ if TYPE_CHECKING:
 _MAX_CONTENT_BYTES = 500 * 1024   # 500 KB — prompt content
 _MAX_LOG_BYTES = 10 * 1024        # 10 KB  — log input/output text
 _MAX_IMPORT_BYTES = 5 * 1024 * 1024  # 5 MB  — JSON import file upload cap
+_MAX_SKILL_UPLOAD_BYTES = 5 * 1024 * 1024
 
 # ---------------------------------------------------------------------------
 # Login rate limiter (in-process; replace with Redis for multi-worker)
@@ -125,8 +136,8 @@ def _clear_login_failures(ip: str) -> None:
 # ---------------------------------------------------------------------------
 
 _CHANGELOG_SYSTEM_PROMPT = """\
-You are a prompt engineering assistant. A new version of a prompt has been saved.
-Given the old and new prompt content, write a concise changelog entry (2–4 sentences) that explains:
+You are an instruction asset change assistant. A new version of a prompt or Agent Skill has been saved.
+Given the old and new instruction asset content, write a concise changelog entry (2–4 sentences) that explains:
 1. What changed (specific wording, tone, structure, instructions)
 2. Why the change was likely made (inferred from the diff)
 3. Any downstream impact to watch for
@@ -136,7 +147,7 @@ Return only the changelog entry text, no headers or bullet points."""
 
 
 async def _generate_changelog(
-    manager: "PromptManager",
+    manager: "LLMAssetManager",
     prompt_name: str,
     version_id: int,
     old_content: str,
@@ -151,20 +162,26 @@ async def _generate_changelog(
     _log = _logging.getLogger("llmpivot.changelog")
     try:
         import difflib
+        display_name = prompt_name
+        is_skill = prompt_name.startswith(SKILL_CHANGELOG_MARKER)
+        if is_skill:
+            display_name = prompt_name[len(SKILL_CHANGELOG_MARKER):]
+            old_content = decode_skill(old_content)["SKILL.md"] if old_content else ""
+            new_content = decode_skill(new_content)["SKILL.md"]
         diff_lines = list(difflib.unified_diff(
             (old_content or "").splitlines(),
             (new_content or "").splitlines(),
             lineterm="",
         ))
-        diff_text = "\n".join(diff_lines[:80]) or "(new prompt — no previous version)"
+        diff_text = "\n".join(diff_lines[:80]) or "(new instruction asset — no previous version)"
 
         # Optionally include metadata context
-        meta = await manager.storage.get_prompt_metadata(prompt_name, tenant_id=manager.tenant_id)
+        meta = {} if is_skill else await manager.storage.get_prompt_metadata(prompt_name, tenant_id=manager.tenant_id)
         purpose = meta.get("purpose", "") if meta else ""
         meta_context = f"\nPrompt purpose: {purpose}" if purpose else ""
 
         user_msg = (
-            f"Prompt name: {prompt_name}{meta_context}\n\n"
+            f"Asset name: {display_name}{meta_context}\n\n"
             f"Diff (unified format):\n{diff_text}\n\n"
             f"New content:\n{new_content[:1500]}"
         )
@@ -191,19 +208,16 @@ async def _generate_changelog(
         entry = await llm._call(_CHANGELOG_SYSTEM_PROMPT, user_msg)
         entry = entry.strip()
 
-        await manager.storage.upsert_changelog_entry(
-            version_id=version_id,
-            entry=entry,
-            generated_by="pivot",
-            created_by=editor,
-            tenant_id=manager.tenant_id,
-        )
+        changelog_upsert = (manager.storage.upsert_skill_changelog_entry if is_skill
+                            else manager.storage.upsert_changelog_entry)
+        await changelog_upsert(version_id=version_id, entry=entry, generated_by="pivot",
+                               created_by=editor, tenant_id=manager.tenant_id)
         _log.info("Auto-changelog generated for %s v%s", prompt_name, version_id)
     except Exception as exc:
         _log.warning("Auto-changelog generation failed for %s (non-fatal): %s", prompt_name, exc)
 
 
-def _build_router(manager: "PromptManager") -> APIRouter:
+def _build_router(manager: "LLMAssetManager") -> APIRouter:
     router = APIRouter()
 
     def _base(request: Request) -> str:
@@ -417,7 +431,6 @@ def _build_router(manager: "PromptManager") -> APIRouter:
         request: Request,
         prompt_name: str = Form(...),
         content: str = Form(...),
-        edited_by: str = Form(""),
         tag: str = Form(""),
         set_active: str = Form("1"),
         password: Optional[str] = Form(None),
@@ -448,7 +461,7 @@ def _build_router(manager: "PromptManager") -> APIRouter:
 
         tag = tag or None
         do_activate = set_active == "1"
-        creator = edited_by or (user.get("username") if user else "") or "anonymous"
+        creator = _actor(request)
 
         if manager.protected_mode and (do_activate or tag == "prod"):
             if not _check_password(password):
@@ -501,7 +514,6 @@ def _build_router(manager: "PromptManager") -> APIRouter:
         name: str,
         request: Request,
         content: str = Form(...),
-        edited_by: str = Form(""),
         tag: str = Form(""),
         set_active: str = Form("1"),
         password: Optional[str] = Form(None),
@@ -532,7 +544,7 @@ def _build_router(manager: "PromptManager") -> APIRouter:
 
         tag = tag or None
         do_activate = set_active == "1"
-        editor_name = edited_by or (user.get("username") if user else "") or "anonymous"
+        editor_name = _actor(request)
 
         if manager.protected_mode and (do_activate or tag == "prod"):
             if not _check_password(password):
@@ -642,7 +654,288 @@ def _build_router(manager: "PromptManager") -> APIRouter:
         return RedirectResponse(f"{base}/list", status_code=303)
 
     # ------------------------------------------------------------------
-    # Diff & A/B test & Logs
+    # Agent Skills — versioned SKILL.md bundles share the prompt history backend.
+    # ------------------------------------------------------------------
+
+    @router.get("/skills", response_class=HTMLResponse)
+    async def skills_index(request: Request):
+        auth_redirect = _check_auth(request, min_role="viewer")
+        if auth_redirect:
+            return auth_redirect
+        items = await manager.storage.fetch_all_skills(tenant_id=manager.tenant_id)
+        for item in items:
+            try:
+                files = decode_skill(item.get("content") or "")
+                item["description"] = parse_skill_markdown(files["SKILL.md"])["description"]
+            except (ValueError, KeyError, TypeError):
+                item["description"] = "Invalid active skill manifest"
+        return HTMLResponse(skills_page(items, manager.protected_mode, _base(request), _get_user(request)))
+
+    @router.get("/skills/import", response_class=HTMLResponse)
+    async def skill_import_get(request: Request):
+        auth_redirect = _check_auth(request, min_role="editor")
+        if auth_redirect:
+            return auth_redirect
+        return HTMLResponse(skill_import_page(manager.protected_mode, _base(request), _get_user(request), csrf_token=_get_csrf(request)))
+
+    @router.post("/skills/import", response_class=HTMLResponse)
+    async def skill_import_post(request: Request, skill_file: UploadFile = File(...),
+                                set_active: str = Form("1"), csrf_token: Optional[str] = Form(None)):
+        auth_redirect = _check_auth(request, min_role="editor")
+        if auth_redirect:
+            return auth_redirect
+        base, user, csrf = _base(request), _get_user(request), _get_csrf(request)
+        if not _validate_csrf(request, csrf_token):
+            return HTMLResponse(skill_import_page(manager.protected_mode, base, user, "Invalid or missing CSRF token.", csrf), status_code=403)
+        try:
+            data = await skill_file.read(_MAX_SKILL_UPLOAD_BYTES + 1)
+            if len(data) > _MAX_SKILL_UPLOAD_BYTES:
+                raise SkillValidationError("Uploaded archive exceeds the 5 MiB limit.")
+            files = skill_from_zip(data)
+            name = parse_skill_markdown(files["SKILL.md"])["name"]
+            content = encode_skill(files)
+            number = await manager.storage.create_skill_version(name, content, _actor(request), None,
+                                                                set_active == "1", tenant_id=manager.tenant_id)
+        except (SkillValidationError, ValueError) as exc:
+            return HTMLResponse(skill_import_page(manager.protected_mode, base, user, str(exc), csrf), status_code=400)
+        versions = await manager.storage.fetch_skill_versions(name, tenant_id=manager.tenant_id)
+        version = next((item for item in versions if item.get("version_number") == number), None)
+        await manager.storage.insert_audit_log(action="skill_imported", performed_by=_actor(request),
+                                               prompt_name=name, version_id=version.get("id") if version else number,
+                                               detail=f"active={set_active == '1'}", tenant_id=manager.tenant_id)
+        if manager.auto_changelog and manager.llm and version:
+            asyncio.get_event_loop().create_task(_generate_changelog(
+                manager, SKILL_CHANGELOG_MARKER + name, version["id"], "", content, _actor(request)))
+        return RedirectResponse(f"{base}/skills/detail/{name}", status_code=303)
+
+    @router.get("/skills/export/{name}")
+    async def skill_export(request: Request, name: str):
+        auth_redirect = _check_auth(request, min_role="viewer")
+        if auth_redirect:
+            return auth_redirect
+        active = await manager.storage.fetch_active_skill_version(name, tenant_id=manager.tenant_id)
+        if not active:
+            return JSONResponse({"detail": "Active skill not found."}, status_code=404)
+        try:
+            files = decode_skill(active["content"])
+        except SkillValidationError as exc:
+            return JSONResponse({"detail": str(exc)}, status_code=400)
+        import io
+        import zipfile
+        stream = io.BytesIO()
+        with zipfile.ZipFile(stream, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            for path, content in files.items():
+                archive.writestr(f"{name}/{path}", content.encode("utf-8"))
+        return Response(stream.getvalue(), media_type="application/zip", headers={
+            "Content-Disposition": f'attachment; filename="{name}.zip"',
+        })
+
+    @router.get("/skills/detail/{name}", response_class=HTMLResponse)
+    async def skill_detail(request: Request, name: str):
+        auth_redirect = _check_auth(request, min_role="viewer")
+        if auth_redirect:
+            return auth_redirect
+        versions = await manager.storage.fetch_skill_versions(name, tenant_id=manager.tenant_id)
+        if not versions:
+            return RedirectResponse(f"{_base(request)}/skills", status_code=303)
+        active = await manager.storage.fetch_active_skill_version(name, tenant_id=manager.tenant_id)
+        display_version = active
+        if not display_version and versions:
+            display_version = versions[0]
+        skill = None
+        if display_version:
+            files = decode_skill(display_version["content"])
+            skill = parse_skill_markdown(files["SKILL.md"])
+            skill.update({"version": display_version["version_number"] if active else None,
+                          "references": [path for path in files if path.startswith("references/")]})
+        changelog = await manager.storage.fetch_skill_changelog(name, tenant_id=manager.tenant_id)
+        current_user = _get_user(request)
+        can_delete = manager.auth_mode != "rbac" or bool(current_user and current_user.get("role") == "admin")
+        return HTMLResponse(skill_detail_page(name, skill, versions, changelog, manager.protected_mode,
+                                              _base(request), current_user, _get_csrf(request), can_delete))
+
+    @router.get("/skills/edit/{name}", response_class=HTMLResponse)
+    async def skill_edit_get(request: Request, name: str):
+        auth_redirect = _check_auth(request, min_role="editor")
+        if auth_redirect:
+            return auth_redirect
+        if name == "__new__":
+            return HTMLResponse(skill_edit_page("", "", "", {}, manager.protected_mode, _base(request),
+                                                _get_user(request), is_new=True, csrf_token=_get_csrf(request),
+                                                pivot_widget=_widget(_base(request))))
+        active = await manager.storage.fetch_active_skill_version(name, tenant_id=manager.tenant_id)
+        if not active:
+            versions = await manager.storage.fetch_skill_versions(name, tenant_id=manager.tenant_id)
+            active = versions[0] if versions else None
+        files = decode_skill(active["content"]) if active else {}
+        manifest = parse_skill_markdown(files["SKILL.md"]) if files else {"description": "", "body": ""}
+        refs = {path: value for path, value in files.items() if path.startswith("references/")}
+        return HTMLResponse(skill_edit_page(name, manifest["description"], manifest["body"], refs,
+                                            manager.protected_mode, _base(request), _get_user(request),
+                                            csrf_token=_get_csrf(request), pivot_widget=_widget(_base(request))))
+
+    # ------------------------------------------------------------------
+    async def _save_skill_version(request: Request, name: str, description: str, instructions: str,
+                                  references_json: str, tag: str, set_active: str,
+                                  csrf_token: Optional[str], password: Optional[str], is_new: bool):
+        base, user, csrf = _base(request), _get_user(request), _get_csrf(request)
+        safe_name = name.strip()
+
+        def render_error(message: str, status_code: int = 400, references: Optional[dict] = None):
+            return HTMLResponse(skill_edit_page(safe_name, description, instructions, references or {},
+                                                manager.protected_mode, base, user, error=message,
+                                                is_new=is_new, csrf_token=csrf, pivot_widget=_widget(base)),
+                                status_code=status_code)
+
+        if not _validate_csrf(request, csrf_token):
+            return render_error("Invalid or missing CSRF token.", 403)
+        if manager.protected_mode and (set_active == "1" or tag == "prod") and not _check_password(password):
+            return render_error("Incorrect admin password.")
+        if len(instructions.encode("utf-8")) > MAX_SKILL_BUNDLE_BYTES:
+            return render_error("Skill instructions exceed the 5 MiB bundle limit.")
+        if tag not in ("", "prod", "staging", "experiment") or set_active not in ("0", "1"):
+            return render_error("Choose a valid release tag and activation state.")
+        try:
+            refs = json.loads(references_json or "{}")
+            if not isinstance(refs, dict):
+                raise SkillValidationError("References must be a JSON object mapping paths to Markdown text.")
+            if any(not isinstance(path, str) or not path.startswith("references/") for path in refs):
+                raise SkillValidationError("The editor accepts only files under references/.")
+            markdown = (f"---\nname: {safe_name}\ndescription: {json.dumps(description, ensure_ascii=False)}"
+                        f"\n---\n\n{instructions.strip()}\n")
+            files = normalize_skill_files({"SKILL.md": markdown, **refs}, expected_name=safe_name)
+            bundle = encode_skill(files)
+        except (json.JSONDecodeError, SkillValidationError, TypeError) as exc:
+            return render_error(str(exc), references=refs if "refs" in locals() and isinstance(refs, dict) else {})
+        creator = _actor(request)
+        version_number = await manager.storage.create_skill_version(
+            safe_name, bundle, creator, tag or None, set_active == "1", tenant_id=manager.tenant_id,
+        )
+        versions = await manager.storage.fetch_skill_versions(safe_name, tenant_id=manager.tenant_id)
+        new_version = next((item for item in versions if item.get("version_number") == version_number), None)
+        await manager.storage.insert_audit_log(
+            action="skill_version_created", performed_by=creator, prompt_name=safe_name,
+            version_id=new_version.get("id") if new_version else version_number,
+            detail=f"tag={tag or None} active={set_active == '1'}", tenant_id=manager.tenant_id,
+        )
+        if manager.auto_changelog and manager.llm and new_version:
+            older = [item for item in versions if item.get("version_number", 0) < version_number]
+            old_content = older[0].get("content", "") if older else ""
+            asyncio.get_event_loop().create_task(_generate_changelog(
+                manager, SKILL_CHANGELOG_MARKER + safe_name, new_version["id"], old_content, bundle, creator))
+        return RedirectResponse(f"{base}/skills/detail/{safe_name}", status_code=303)
+
+    @router.post("/skills/edit/__new__")
+    async def skill_create_post(request: Request, skill_name: str = Form(...), description: str = Form(...),
+                                instructions: str = Form(...), references_json: str = Form("{}"),
+                                tag: str = Form(""), set_active: str = Form("0"), password: Optional[str] = Form(None),
+                                csrf_token: Optional[str] = Form(None)):
+        auth_redirect = _check_auth(request, min_role="editor")
+        if auth_redirect:
+            return auth_redirect
+        return await _save_skill_version(request, skill_name, description, instructions, references_json,
+                                         tag, set_active, csrf_token, password, True)
+
+    @router.post("/skills/edit/{name}")
+    async def skill_version_post(request: Request, name: str, description: str = Form(...),
+                                 instructions: str = Form(...), references_json: str = Form("{}"),
+                                 tag: str = Form(""), set_active: str = Form("0"), password: Optional[str] = Form(None),
+                                 csrf_token: Optional[str] = Form(None)):
+        auth_redirect = _check_auth(request, min_role="editor")
+        if auth_redirect:
+            return auth_redirect
+        return await _save_skill_version(request, name, description, instructions, references_json,
+                                         tag, set_active, csrf_token, password, False)
+
+    @router.post("/skills/activate/{name}/{version_id}")
+    async def skill_activate(request: Request, name: str, version_id: str, csrf_token: Optional[str] = Form(None)):
+        auth_redirect = _check_auth(request, min_role="editor")
+        if auth_redirect:
+            return auth_redirect
+        if not _validate_csrf(request, csrf_token):
+            return JSONResponse({"detail": "Invalid or missing CSRF token."}, status_code=403)
+        versions = await manager.storage.fetch_skill_versions(name, tenant_id=manager.tenant_id)
+        if not any(str(version.get("id")) == str(version_id) for version in versions):
+            return JSONResponse({"detail": "Skill version not found."}, status_code=404)
+        await manager.storage.activate_skill_version(version_id, tenant_id=manager.tenant_id)
+        await manager.storage.insert_audit_log(action="skill_activated", performed_by=_actor(request),
+                                               prompt_name=name, version_id=version_id,
+                                               tenant_id=manager.tenant_id)
+        return RedirectResponse(f"{_base(request)}/skills/detail/{name}", status_code=303)
+
+    @router.post("/skills/delete/{name}")
+    async def skill_delete(request: Request, name: str, csrf_token: Optional[str] = Form(None)):
+        auth_redirect = _check_auth(request, min_role="admin")
+        if auth_redirect:
+            return auth_redirect
+        if not _validate_csrf(request, csrf_token):
+            return JSONResponse({"detail": "Invalid or missing CSRF token."}, status_code=403)
+        await manager.storage.delete_skill(name, tenant_id=manager.tenant_id)
+        await manager.storage.insert_audit_log(action="skill_deleted", performed_by=_actor(request),
+                                               prompt_name=name, tenant_id=manager.tenant_id)
+        return RedirectResponse(f"{_base(request)}/skills", status_code=303)
+
+    @router.get("/skills/diff/{name}", response_class=HTMLResponse)
+    async def skill_diff(request: Request, name: str, v1: Optional[str] = None, v2: Optional[str] = None):
+        auth_redirect = _check_auth(request, min_role="viewer")
+        if auth_redirect:
+            return auth_redirect
+        versions = await manager.storage.fetch_skill_versions(name, tenant_id=manager.tenant_id)
+        one = next((v for v in versions if str(v.get("id")) == str(v1)), None) if v1 else None
+        two = next((v for v in versions if str(v.get("id")) == str(v2)), None) if v2 else None
+        if one:
+            one = dict(one); one["content"] = decode_skill(one["content"])["SKILL.md"]
+        if two:
+            two = dict(two); two["content"] = decode_skill(two["content"])["SKILL.md"]
+        return HTMLResponse(skill_diff_page(name, versions, one, two, _base(request), _get_user(request)))
+
+    @router.get("/skills/test/{name}", response_class=HTMLResponse)
+    async def skill_test_get(request: Request, name: str):
+        auth_redirect = _check_auth(request, min_role="viewer")
+        if auth_redirect:
+            return auth_redirect
+        versions = await manager.storage.fetch_skill_versions(name, tenant_id=manager.tenant_id)
+        return HTMLResponse(skill_test_page(name, versions, manager.protected_mode, manager.has_llm,
+                                            _base(request), _get_user(request)))
+
+    @router.post("/skills/test/{name}", response_class=HTMLResponse)
+    async def skill_test_post(request: Request, name: str, v1: str = Form(...), v2: str = Form(...),
+                              task: str = Form(...)):
+        auth_redirect = _check_auth(request, min_role="viewer")
+        if auth_redirect:
+            return auth_redirect
+        versions = await manager.storage.fetch_skill_versions(name, tenant_id=manager.tenant_id)
+        first = next((v for v in versions if str(v.get("id")) == str(v1)), None)
+        second = next((v for v in versions if str(v.get("id")) == str(v2)), None)
+        if not manager.llm:
+            return HTMLResponse(skill_test_page(name, versions, manager.protected_mode, False,
+                                                _base(request), _get_user(request)))
+        if not first or not second:
+            return JSONResponse({"detail": "Select versions belonging to this skill."}, status_code=400)
+        if len(task.encode("utf-8")) > _MAX_LOG_BYTES:
+            return JSONResponse({"detail": "Evaluation task is too long."}, status_code=400)
+        first_files, second_files = decode_skill(first["content"]), decode_skill(second["content"])
+        first_manifest = parse_skill_markdown(first_files["SKILL.md"])
+        second_manifest = parse_skill_markdown(second_files["SKILL.md"])
+        first_context = f"Skill: {name}\n{first_manifest['description']}\n\n{first_manifest['body']}"
+        second_context = f"Skill: {name}\n{second_manifest['description']}\n\n{second_manifest['body']}"
+        for path, content in first_files.items():
+            if path.startswith("references/"):
+                first_context += f"\n\nReference {path}:\n{content}"
+        for path, content in second_files.items():
+            if path.startswith("references/"):
+                second_context += f"\n\nReference {path}:\n{content}"
+        try:
+            output_a, output_b = await asyncio.gather(
+                manager.llm.run(first_context, task),
+                manager.llm.run(second_context, task),
+            )
+        except Exception as exc:
+            output_a = output_b = f"Evaluation failed: {exc}"
+        return HTMLResponse(skill_test_page(name, versions, manager.protected_mode, True, _base(request),
+                                            _get_user(request), output_a, output_b, v1, v2, task))
+
+    # Prompt Diff & A/B test & Logs
     # ------------------------------------------------------------------
 
     @router.get("/diff/{name}", response_class=HTMLResponse)

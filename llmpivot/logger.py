@@ -65,10 +65,10 @@ class PromptLogger:
         Call this during application shutdown before cancelling the worker.
         Waits up to 10 seconds before giving up.
         """
-        if self._queue.empty():
-            return
         try:
-            await asyncio.wait_for(self._flush_remaining(), timeout=10.0)
+            if not self._queue.empty():
+                await asyncio.wait_for(self._flush_remaining(), timeout=10.0)
+            await asyncio.wait_for(self._queue.join(), timeout=10.0)
         except asyncio.TimeoutError:
             remaining = self._queue.qsize()
             logger.warning(
@@ -83,7 +83,6 @@ class PromptLogger:
                 try:
                     item = self._queue.get_nowait()
                     batch.append(item)
-                    self._queue.task_done()
                 except asyncio.QueueEmpty:
                     break
             if batch:
@@ -91,6 +90,15 @@ class PromptLogger:
                     await self.storage.insert_logs_batch(batch)
                 except Exception as exc:
                     logger.warning("Failed to flush log batch on drain: %s", exc)
+                finally:
+                    for _ in batch:
+                        self._queue.task_done()
+
+    async def flush(self) -> None:
+        """Wait until all currently queued usage logs have been persisted."""
+        if not self._queue.empty():
+            self.start()
+        await asyncio.wait_for(self._queue.join(), timeout=10.0)
 
     def log(
         self,
@@ -149,13 +157,11 @@ class PromptLogger:
                     self._queue.get(), timeout=self._flush_interval
                 )
                 batch.append(first_item)
-                self._queue.task_done()
 
                 # Drain up to batch_size more
                 while len(batch) < self._batch_size and not self._queue.empty():
                     item = self._queue.get_nowait()
                     batch.append(item)
-                    self._queue.task_done()
 
             except asyncio.TimeoutError:
                 pass
@@ -166,6 +172,9 @@ class PromptLogger:
                         await self.storage.insert_logs_batch(batch)
                     except Exception as exc:
                         logger.warning("Failed to flush batch on cancel: %s", exc)
+                    finally:
+                        for _ in batch:
+                            self._queue.task_done()
                 break
             except Exception as exc:
                 logger.debug("Error in batch log worker: %s", exc)
@@ -175,3 +184,6 @@ class PromptLogger:
                     await self.storage.insert_logs_batch(batch)
                 except Exception as exc:
                     logger.warning("Failed to flush log batch: %s", exc)
+                finally:
+                    for _ in batch:
+                        self._queue.task_done()

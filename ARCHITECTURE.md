@@ -14,7 +14,7 @@ Your FastAPI App
 │   aget_prompt_with_meta("my_prompt")                                    │
 │        │                                                                 │
 │        ▼                                                                 │
-│   PromptManager.get_with_meta()                                         │
+│   LLMAssetManager.get_with_meta()                                         │
 │        │                                                                 │
 │        ▼                                                                 │
 │   PromptCache._store  ──── hit ──► return {"content", "version_id"}    │
@@ -48,7 +48,7 @@ Your FastAPI App
 ```
 llmpivot/
 ├── __init__.py        Public API surface:
-│                      PromptManager, get_prompt, aget_prompt,
+│                      LLMAssetManager, get_prompt, aget_prompt,
 │                      aget_prompt_with_meta, aget_prompt_with_fallback,
 │                      log_prompt_usage, PromptNotFoundError
 │
@@ -82,7 +82,7 @@ llmpivot/
 │                      Auto-detects Azure vs standard OpenAI from URL.
 │                      Selects max_tokens vs max_completion_tokens from model name.
 │                      All params (temperature, top_p, token limit, api_type,
-│                      extra_params) are configurable via PromptManager constructor.
+│                      extra_params) are configurable via LLMAssetManager constructor.
 │                      3-retry exponential backoff on 5xx / 429 / timeout / connect.
 │
 ├── pivot.py           PivotAgent — the Assistant backend.
@@ -90,6 +90,10 @@ llmpivot/
 │                      chat(session_id, message, context) → async generator of text chunks
 │                      Tool-calling loop: up to 4 rounds, 10s per tool.
 │                      Write tools require explicit user confirmation.
+│
+├── skills.py          Agent Skills bundle validation and SKILL.md parsing.
+│                      Standard frontmatter, bounded ZIP import, safe paths,
+│                      Markdown references, and no script execution.
 │
 ├── auth.py            Password hashing: Argon2id → bcrypt → PBKDF2.
 │                      HMAC-SHA256 session tokens (no JWT library dependency).
@@ -100,7 +104,7 @@ llmpivot/
 │
 └── ui/
     ├── __init__.py    Exports build_router.
-    ├── routes.py      All HTTP handlers. Closure over PromptManager instance.
+    ├── routes.py      All HTTP handlers. Closure over LLMAssetManager instance.
     │                  Phase 1 routes: /metadata, /changelog, /context, /tree, /health
     │                  Phase 2 routes: /pivot/observe (SSE), /pivot/chat (chunked HTTP)
     │                  CSRF validation on every POST.
@@ -113,12 +117,20 @@ llmpivot/
     └── helpers.py     escape() and render_user_badge() utilities.
 ```
 
+Agent Skills use separate `skills`, `skill_versions`, and `skill_changelog`
+tables in SQLite and matching collections in MongoDB. They have their own
+version, activation, and changelog lifecycle, and never appear in prompt
+listing, fallback snapshots, exports, or usage logs. The public API and UI
+expose skill slugs directly.
+`LLMAssetManager` is the canonical class name, while `PromptManager` remains
+available as a backwards-compatible alias.
+
 ---
 
 ## 3. Startup sequence
 
 ```
-PromptManager.__init__()
+LLMAssetManager.__init__()
   1. Resolve auth_mode
   2. Guard: raise ValueError if default secret_key used with auth_mode="rbac"
   3. Pick storage backend (SQLiteStorage or MongoStorage)
@@ -260,6 +272,19 @@ Browser POST /prompts/pivot/chat  { session_id, message, context }
 Write tools (`create_version`) require an explicit confirm POST before executing — the agent streams a diff preview and waits.
 
 ---
+
+## Agent Skills and progressive loading
+
+Each skill is a versioned bundle containing `SKILL.md` plus optional Markdown
+references. `alist_skills()` returns only names and descriptions; `aget_skill()`
+loads one active instruction file; `aget_skill_reference()` reads one approved
+reference path. Pivot exposes the same operations as read-only tools. Its
+`skill_loading_mode` defaults to `progressive`; `eager` includes all active
+instruction and reference text in each request. Skill scripts are not executed.
+
+Skill changes reuse version activation, tags, audit events, and auto-changelogs.
+The skills UI adds ZIP import/export, activation, SKILL.md diff, and side-by-side
+task evaluation for two versions.
 
 ## 9. Auto-changelog generation
 
@@ -404,7 +429,7 @@ The widget is injected as a `<div id="pivot-widget" x-data="pivotWidget()">` blo
 
 **LLM config is fully externalised** — `LLMClient` has no hardcoded assumptions. `api_type`, token limit field, temperature, extra params are all caller-controlled. Auto-detection is a default, not a constraint.
 
-**Singleton PromptManager** — `_instance` enables module-level helpers without requiring callers to thread the manager object through the call stack.
+**Singleton LLMAssetManager** — `_instance` enables module-level helpers without requiring callers to thread the manager object through the call stack.
 
 **Soft deletes** — `is_deleted=1` on the prompt row. Data is never destroyed. A `create_version` call on the same name restores it.
 

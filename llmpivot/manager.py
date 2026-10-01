@@ -1,5 +1,5 @@
 """
-PromptManager - central coordinator for llmpivot.
+LLMAssetManager - central coordinator for llmpivot.
 Initialize once at app startup; get_prompt() uses the singleton.
 
 Production hardening in this version:
@@ -27,10 +27,11 @@ from .storage import BaseStorage, SQLiteStorage, MongoStorage
 from .cache import PromptCache
 from .logger import PromptLogger
 from .llm import LLMClient
+from .skills import decode_skill, parse_skill_markdown, reference_for
 
 logger = logging.getLogger("llmpivot")
 
-_instance: Optional["PromptManager"] = None
+_instance: Optional["LLMAssetManager"] = None
 
 _DEFAULT_SECRET_KEY = "llmpivot-secret-key-change-me"
 
@@ -39,7 +40,7 @@ class PromptNotFoundError(Exception):
     pass
 
 
-class PromptManager:
+class LLMAssetManager:
     def __init__(
         self,
         db_path: str = "prompts.db",
@@ -88,6 +89,7 @@ class PromptManager:
         # ----------------------------------------------------------------
         fallback_snapshot: bool = True,        # write prompts_fallback.json on activation + warm
         fallback_path: Optional[str] = None,   # override path; default = next to db_path
+        skill_loading_mode: str = "progressive",  # "progressive" | "eager" for Pivot chat
     ):
         global _instance
 
@@ -109,6 +111,9 @@ class PromptManager:
 
         # Fallback snapshot
         self.fallback_snapshot = fallback_snapshot
+        if skill_loading_mode not in ("progressive", "eager"):
+            raise ValueError("skill_loading_mode must be 'progressive' or 'eager'.")
+        self.skill_loading_mode = skill_loading_mode
         if fallback_path:
             self.fallback_path = fallback_path
         else:
@@ -125,7 +130,7 @@ class PromptManager:
         resolved_key = secret_key or _DEFAULT_SECRET_KEY
         if resolved_key == _DEFAULT_SECRET_KEY and self.auth_mode == "rbac":
             logger.critical(
-                "SECURITY: PromptManager is using the default secret_key with auth_mode='rbac'. "
+                "SECURITY: LLMAssetManager is using the default secret_key with auth_mode='rbac'. "
                 "Session tokens can be forged by anyone who knows this public default. "
                 "Set a strong random secret_key before deploying to production. "
                 "Example: secret_key=secrets.token_hex(32)"
@@ -133,7 +138,7 @@ class PromptManager:
             raise ValueError(
                 "secret_key must be set explicitly when auth_mode='rbac'. "
                 "The default key 'llmpivot-secret-key-change-me' is publicly known. "
-                "Pass secret_key=<your-strong-random-key> to PromptManager()."
+                "Pass secret_key=<your-strong-random-key> to LLMAssetManager()."
             )
         self.secret_key = resolved_key
 
@@ -150,7 +155,7 @@ class PromptManager:
             self.storage.init_db_sync()
         except Exception as exc:
             raise RuntimeError(
-                f"PromptManager failed to initialise storage at '{db_path}': {exc}. "
+                f"LLMAssetManager failed to initialise storage at '{db_path}': {exc}. "
                 "Check that the path is writable and the database is not corrupted."
             ) from exc
 
@@ -176,8 +181,8 @@ class PromptManager:
 
         _instance = self
         logger.info(
-            "PromptManager initialised (storage=%s, tenant=%s, ttl=%ds, auth_mode=%s, "
-            "cookie_secure=%s, pivot_enabled=%s, fallback_snapshot=%s)",
+            "LLMAssetManager initialised (storage=%s, tenant=%s, ttl=%ds, auth_mode=%s, "
+            "cookie_secure=%s, pivot_enabled=%s, fallback_snapshot=%s, skill_loading_mode=%s)",
             storage_type,
             tenant_id,
             cache_ttl,
@@ -185,6 +190,7 @@ class PromptManager:
             cookie_secure,
             pivot_enabled,
             fallback_snapshot,
+            skill_loading_mode,
         )
 
     @property
@@ -288,7 +294,7 @@ class PromptManager:
         Graceful shutdown: drain the usage-log queue, then stop background tasks.
         Call this from the lifespan teardown or a SIGTERM handler.
         """
-        logger.info("PromptManager shutting down — draining log queue...")
+        logger.info("LLMAssetManager shutting down — draining log queue...")
         try:
             await self.usage_logger.drain()
         except Exception as exc:
@@ -296,7 +302,7 @@ class PromptManager:
 
         self.usage_logger.stop()
         self.cache.stop()
-        logger.info("PromptManager shutdown complete.")
+        logger.info("LLMAssetManager shutdown complete.")
 
     def mount_ui(self):
         """
@@ -431,6 +437,81 @@ class PromptManager:
     def log_usage(self, prompt_name: str, version_id: int, input_text: str, output_text: str) -> None:
         self.usage_logger.log(prompt_name, version_id, input_text, output_text)
 
+    async def list_skills(self) -> list:
+        """Return a small catalog of active skills; bodies and references stay unloaded."""
+        skills = []
+        for item in await self.storage.fetch_all_skills(tenant_id=self.tenant_id):
+            if not item.get("content") or item.get("active_version") is None:
+                continue
+            try:
+                files = decode_skill(item["content"])
+                manifest = parse_skill_markdown(files["SKILL.md"])
+                if manifest["name"] != item["name"]:
+                    raise ValueError("skill slug mismatch")
+            except (ValueError, KeyError, TypeError):
+                logger.warning("Skipping invalid active skill '%s'.", item.get("name"))
+                continue
+            skills.append({
+                "name": item["name"],
+                "description": manifest["description"],
+                "version": item.get("active_version"),
+                "updated_at": item.get("last_updated"),
+            })
+        return skills
+
+    async def get_skill(self, name: str, include_references: bool = False) -> dict:
+        """Load one active SKILL.md; references are opt-in and normally lazy-loaded."""
+        active = await self.storage.fetch_active_skill_version(name, tenant_id=self.tenant_id)
+        if not active:
+            raise KeyError(f"No active skill found for '{name}'.")
+        files = decode_skill(active["content"])
+        manifest = parse_skill_markdown(files["SKILL.md"])
+        if manifest["name"] != name:
+            raise ValueError("Skill manifest name does not match its stored slug.")
+        result = {
+            "name": name,
+            "description": manifest["description"],
+            "content": files["SKILL.md"],
+            "body": manifest["body"],
+            "version_id": active["id"],
+            "version": active["version_number"],
+            "references": sorted(path for path in files if path.startswith("references/")),
+        }
+        if include_references:
+            result["reference_content"] = {
+                path: value for path, value in files.items() if path.startswith("references/")
+            }
+        return result
+
+    async def get_skill_reference(self, name: str, path: str) -> str:
+        """Load a single references/*.md file from the active skill version."""
+        active = await self.storage.fetch_active_skill_version(name, tenant_id=self.tenant_id)
+        if not active:
+            raise KeyError(f"No active skill found for '{name}'.")
+        return reference_for(decode_skill(active["content"]), path)
+
+    def skill_tool_schemas(self) -> list:
+        """Provider-neutral function schemas for progressive skill loading."""
+        return [
+            {"type": "function", "function": {"name": "list_skills", "description": "List available skills using short descriptions only.", "parameters": {"type": "object", "properties": {}, "required": []}}},
+            {"type": "function", "function": {"name": "get_skill", "description": "Load one active skill's SKILL.md instructions by name.", "parameters": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}}},
+            {"type": "function", "function": {"name": "get_skill_reference", "description": "Load one named Markdown reference from a skill, only when its instructions require it.", "parameters": {"type": "object", "properties": {"name": {"type": "string"}, "path": {"type": "string"}}, "required": ["name", "path"]}}},
+        ]
+
+    async def call_skill_tool(self, name: str, arguments: dict) -> str:
+        """Execute one of the read-only, progressive skill-loading tools."""
+        if name == "list_skills":
+            import json
+            return json.dumps(await self.list_skills(), ensure_ascii=False)
+        if name == "get_skill":
+            import json
+            return json.dumps(await self.get_skill(str(arguments.get("name", ""))), ensure_ascii=False)
+        if name == "get_skill_reference":
+            return await self.get_skill_reference(
+                str(arguments.get("name", "")), str(arguments.get("path", ""))
+            )
+        raise KeyError(f"Unknown skill tool '{name}'.")
+
     def schedule_snapshot_refresh(self) -> None:
         """
         Fire-and-forget: schedule a fallback snapshot refresh on the running event loop.
@@ -447,7 +528,11 @@ class PromptManager:
             pass
 
 
-def get_instance() -> PromptManager:
+# Backwards-compatible import for existing llmpivot installations.
+PromptManager = LLMAssetManager
+
+
+def get_instance() -> LLMAssetManager:
     if _instance is None:
-        raise RuntimeError("PromptManager has not been initialized. Call PromptManager(...) first.")
+        raise RuntimeError("LLMAssetManager has not been initialized. Call LLMAssetManager(...) first.")
     return _instance

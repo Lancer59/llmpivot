@@ -220,6 +220,40 @@ class BaseStorage(ABC):
     ) -> List[Dict[str, Any]]:
         return []
 
+    # ------------------------------------------------------------------
+    # Skills use a separate version and changelog lifecycle from prompts.
+    # ------------------------------------------------------------------
+
+    async def create_skill_version(
+        self, name: str, content: str, created_by: str, tag: Optional[str],
+        set_active: bool, tenant_id: str = "default",
+    ) -> int:
+        raise NotImplementedError
+
+    async def fetch_skill_versions(self, name: str, tenant_id: str = "default") -> List[Dict[str, Any]]:
+        return []
+
+    async def fetch_active_skill_version(self, name: str, tenant_id: str = "default") -> Optional[Dict[str, Any]]:
+        return None
+
+    async def activate_skill_version(self, version_id: Any, tenant_id: str = "default") -> bool:
+        return False
+
+    async def delete_skill(self, name: str, tenant_id: str = "default") -> None:
+        return None
+
+    async def fetch_skill_changelog(self, name: str, tenant_id: str = "default") -> List[Dict[str, Any]]:
+        return []
+
+    async def upsert_skill_changelog_entry(
+        self, version_id: Any, entry: str, generated_by: str = "user",
+        created_by: str = "", tenant_id: str = "default",
+    ) -> None:
+        return None
+
+    async def fetch_all_skills(self, tenant_id: str = "default") -> List[Dict[str, Any]]:
+        return []
+
 
 # ---------------------------------------------------------------------------
 # SQLite implementation
@@ -314,6 +348,37 @@ class SQLiteStorage(BaseStorage):
             generated_by   TEXT DEFAULT 'user',
             created_at     DATETIME DEFAULT CURRENT_TIMESTAMP,
             created_by     TEXT DEFAULT ''
+        );
+
+        CREATE TABLE IF NOT EXISTS skills (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            name       TEXT NOT NULL,
+            tenant_id  TEXT DEFAULT 'default',
+            is_deleted INTEGER DEFAULT 0,
+            UNIQUE(tenant_id, name)
+        );
+
+        CREATE TABLE IF NOT EXISTS skill_versions (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            skill_id       INTEGER NOT NULL REFERENCES skills(id),
+            tenant_id      TEXT DEFAULT 'default',
+            content        TEXT NOT NULL,
+            version_number INTEGER NOT NULL,
+            created_at     DATETIME DEFAULT CURRENT_TIMESTAMP,
+            created_by     TEXT,
+            tag            TEXT CHECK(tag IN ('prod', 'staging', 'experiment')),
+            is_active      INTEGER DEFAULT 0
+        );
+
+        CREATE TABLE IF NOT EXISTS skill_changelog (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            version_id   INTEGER NOT NULL REFERENCES skill_versions(id),
+            tenant_id    TEXT DEFAULT 'default',
+            entry        TEXT NOT NULL,
+            generated_by TEXT DEFAULT 'user',
+            created_at   DATETIME DEFAULT CURRENT_TIMESTAMP,
+            created_by   TEXT DEFAULT '',
+            UNIQUE(version_id, tenant_id)
         );
 
         CREATE TABLE IF NOT EXISTS app_context (
@@ -456,7 +521,8 @@ class SQLiteStorage(BaseStorage):
                 SELECT p.id, p.name,
                        pv.version_number AS active_version,
                        pv.created_by     AS last_edited_by,
-                       pv.created_at     AS last_updated
+                       pv.created_at     AS last_updated,
+                       COALESCE(length(pv.content), 0) AS active_content_chars
                 FROM prompts p
                 LEFT JOIN prompt_versions pv
                     ON pv.prompt_id = p.id AND pv.is_active = 1 AND pv.tenant_id = ?
@@ -486,6 +552,88 @@ class SQLiteStorage(BaseStorage):
             rows = cur.fetchall()
             return [dict(r) for r in rows]
         return await asyncio.to_thread(self._run_sqlite, _fn)
+
+    async def create_skill_version(self, name: str, content: str, created_by: str,
+                                   tag: Optional[str], set_active: bool,
+                                   tenant_id: str = "default") -> int:
+        def _fn(conn):
+            cur = conn.cursor()
+            cur.execute("SELECT id FROM skills WHERE name=? AND tenant_id=?", (name, tenant_id))
+            row = cur.fetchone()
+            if row:
+                skill_id = row["id"]
+                cur.execute("UPDATE skills SET is_deleted=0 WHERE id=? AND tenant_id=?", (skill_id, tenant_id))
+            else:
+                cur.execute("INSERT INTO skills(name, tenant_id) VALUES(?, ?)", (name, tenant_id))
+                skill_id = cur.lastrowid
+            cur.execute("SELECT COALESCE(MAX(version_number), 0) + 1 AS n FROM skill_versions WHERE skill_id=? AND tenant_id=?", (skill_id, tenant_id))
+            version = cur.fetchone()["n"]
+            if tag == "prod":
+                cur.execute("UPDATE skill_versions SET tag=NULL WHERE skill_id=? AND tenant_id=? AND tag='prod'", (skill_id, tenant_id))
+            if set_active:
+                cur.execute("UPDATE skill_versions SET is_active=0 WHERE skill_id=? AND tenant_id=?", (skill_id, tenant_id))
+            cur.execute("INSERT INTO skill_versions(skill_id, tenant_id, content, version_number, created_by, tag, is_active) VALUES(?,?,?,?,?,?,?)",
+                        (skill_id, tenant_id, content, version, created_by, tag, int(set_active)))
+            conn.commit()
+            return version
+        return await asyncio.to_thread(self._run_sqlite, _fn)
+
+    async def fetch_skill_versions(self, name: str, tenant_id: str = "default") -> List[Dict[str, Any]]:
+        def _fn(conn):
+            rows = conn.execute("SELECT sv.id, sv.version_number, sv.content, sv.created_at, sv.created_by, sv.tag, sv.is_active FROM skill_versions sv JOIN skills s ON s.id=sv.skill_id WHERE s.name=? AND s.tenant_id=? AND s.is_deleted=0 AND sv.tenant_id=? ORDER BY sv.version_number DESC", (name, tenant_id, tenant_id)).fetchall()
+            return [dict(row) for row in rows]
+        return await asyncio.to_thread(self._run_sqlite, _fn)
+
+    async def fetch_active_skill_version(self, name: str, tenant_id: str = "default") -> Optional[Dict[str, Any]]:
+        def _fn(conn):
+            row = conn.execute("SELECT sv.id, sv.version_number, sv.content, sv.created_at, sv.created_by, sv.tag, sv.is_active FROM skill_versions sv JOIN skills s ON s.id=sv.skill_id WHERE s.name=? AND s.tenant_id=? AND s.is_deleted=0 AND sv.tenant_id=? AND sv.is_active=1 LIMIT 1", (name, tenant_id, tenant_id)).fetchone()
+            return dict(row) if row else None
+        return await asyncio.to_thread(self._run_sqlite, _fn)
+
+    async def activate_skill_version(self, version_id: Any, tenant_id: str = "default") -> bool:
+        try: version_id = int(version_id)
+        except (TypeError, ValueError): return False
+        def _fn(conn):
+            row = conn.execute("SELECT sv.skill_id FROM skill_versions sv JOIN skills s ON s.id=sv.skill_id WHERE sv.id=? AND sv.tenant_id=? AND s.is_deleted=0", (version_id, tenant_id)).fetchone()
+            if not row: return False
+            conn.execute("UPDATE skill_versions SET is_active=0 WHERE skill_id=? AND tenant_id=?", (row["skill_id"], tenant_id))
+            conn.execute("UPDATE skill_versions SET is_active=1 WHERE id=? AND tenant_id=?", (version_id, tenant_id))
+            conn.commit()
+            return True
+        return await asyncio.to_thread(self._run_sqlite, _fn)
+
+    async def delete_skill(self, name: str, tenant_id: str = "default") -> None:
+        def _fn(conn):
+            row = conn.execute("SELECT id FROM skills WHERE name=? AND tenant_id=?", (name, tenant_id)).fetchone()
+            if row:
+                conn.execute("UPDATE skill_versions SET is_active=0 WHERE skill_id=? AND tenant_id=?", (row["id"], tenant_id))
+                conn.execute("UPDATE skills SET is_deleted=1 WHERE id=? AND tenant_id=?", (row["id"], tenant_id))
+            conn.commit()
+        await asyncio.to_thread(self._run_sqlite, _fn)
+
+    async def fetch_all_skills(self, tenant_id: str = "default") -> List[Dict[str, Any]]:
+        def _fn(conn):
+            rows = conn.execute("""SELECT s.id, s.name, active.version_number AS active_version,
+                COALESCE(active.created_by, latest.created_by) AS last_edited_by,
+                COALESCE(active.created_at, latest.created_at) AS last_updated,
+                COALESCE(active.content, latest.content) AS content
+                FROM skills s
+                LEFT JOIN skill_versions active ON active.skill_id=s.id AND active.tenant_id=? AND active.is_active=1
+                LEFT JOIN skill_versions latest ON latest.skill_id=s.id AND latest.tenant_id=? AND latest.version_number=(SELECT MAX(v.version_number) FROM skill_versions v WHERE v.skill_id=s.id AND v.tenant_id=?)
+                WHERE s.tenant_id=? AND s.is_deleted=0 ORDER BY s.name""", (tenant_id, tenant_id, tenant_id, tenant_id)).fetchall()
+            return [dict(row) for row in rows]
+        return await asyncio.to_thread(self._run_sqlite, _fn)
+
+    async def fetch_skill_changelog(self, name: str, tenant_id: str = "default") -> List[Dict[str, Any]]:
+        def _fn(conn):
+            rows = conn.execute("SELECT sc.*, sv.version_number FROM skill_changelog sc JOIN skill_versions sv ON sv.id=sc.version_id JOIN skills s ON s.id=sv.skill_id WHERE s.name=? AND s.tenant_id=? AND s.is_deleted=0 AND sc.tenant_id=? ORDER BY sv.version_number DESC", (name, tenant_id, tenant_id)).fetchall()
+            return [dict(row) for row in rows]
+        return await asyncio.to_thread(self._run_sqlite, _fn)
+
+    async def upsert_skill_changelog_entry(self, version_id: Any, entry: str, generated_by: str = "user", created_by: str = "", tenant_id: str = "default") -> None:
+        def _fn(conn):
+            conn.execute("INSERT INTO skill_changelog(version_id,tenant_id,entry,generated_by,created_by) VALUES(?,?,?,?,?) ON CONFLICT(version_id,tenant_id) DO UPDATE SET entry=excluded.entry, generated_by=excluded.generated_by, created_by=excluded.created_by", (int(version_id), tenant_id, entry, generated_by, created_by)); conn.commit()
+        await asyncio.to_thread(self._run_sqlite, _fn)
 
     async def fetch_version_by_id(self, version_id: Any, tenant_id: str = "default") -> Optional[Dict[str, Any]]:
         try:
@@ -1193,8 +1341,96 @@ class MongoStorage(BaseStorage):
                 "active_version": active["version_number"] if active else None,
                 "last_edited_by": active.get("created_by") if active else None,
                 "last_updated": active.get("created_at") if active else None,
+                "active_content_chars": len(active.get("content") or "") if active else 0,
             })
         return sorted(results, key=lambda x: x["name"])
+
+    async def create_skill_version(self, name: str, content: str, created_by: str,
+                                   tag: Optional[str], set_active: bool,
+                                   tenant_id: str = "default") -> int:
+        await self.db.skills.update_one(
+            {"name": name, "tenant_id": tenant_id},
+            {"$setOnInsert": {"name": name, "tenant_id": tenant_id, "is_deleted": False}},
+            upsert=True,
+        )
+        skill = await self.db.skills.find_one({"name": name, "tenant_id": tenant_id})
+        previous = await self.db.skill_versions.find_one(
+            {"skill_id": skill["_id"], "tenant_id": tenant_id}, sort=[("version_number", -1)]
+        )
+        version = (previous["version_number"] + 1) if previous else 1
+        if tag == "prod":
+            await self.db.skill_versions.update_many(
+                {"skill_id": skill["_id"], "tenant_id": tenant_id, "tag": "prod"}, {"$set": {"tag": None}}
+            )
+        if set_active:
+            await self.db.skill_versions.update_many(
+                {"skill_id": skill["_id"], "tenant_id": tenant_id}, {"$set": {"is_active": False}}
+            )
+        await self.db.skills.update_one({"_id": skill["_id"]}, {"$set": {"is_deleted": False}})
+        await self.db.skill_versions.insert_one({
+            "skill_id": skill["_id"], "skill_name": name, "tenant_id": tenant_id,
+            "content": content, "version_number": version,
+            "created_at": time.strftime("%Y-%m-%d %H:%M:%S"), "created_by": created_by,
+            "tag": tag, "is_active": bool(set_active),
+        })
+        return version
+
+    async def fetch_skill_versions(self, name: str, tenant_id: str = "default") -> List[Dict[str, Any]]:
+        skill = await self.db.skills.find_one({"name": name, "tenant_id": tenant_id, "is_deleted": {"$ne": True}})
+        if not skill:
+            return []
+        docs = await self.db.skill_versions.find({"skill_name": name, "tenant_id": tenant_id}).sort("version_number", -1).to_list(length=1000)
+        return [{"id": str(d["_id"]), "version_number": d["version_number"], "content": d["content"], "created_at": d.get("created_at"), "created_by": d.get("created_by"), "tag": d.get("tag"), "is_active": d.get("is_active", False)} for d in docs]
+
+    async def fetch_active_skill_version(self, name: str, tenant_id: str = "default") -> Optional[Dict[str, Any]]:
+        skill = await self.db.skills.find_one({"name": name, "tenant_id": tenant_id, "is_deleted": {"$ne": True}})
+        if not skill:
+            return None
+        d = await self.db.skill_versions.find_one({"skill_name": name, "tenant_id": tenant_id, "is_active": True})
+        if not d: return None
+        return {"id": str(d["_id"]), "version_number": d["version_number"], "content": d["content"], "created_at": d.get("created_at"), "created_by": d.get("created_by"), "tag": d.get("tag"), "is_active": True}
+
+    async def activate_skill_version(self, version_id: Any, tenant_id: str = "default") -> bool:
+        from bson import ObjectId
+        try: oid = ObjectId(str(version_id))
+        except Exception: return False
+        doc = await self.db.skill_versions.find_one({"_id": oid, "tenant_id": tenant_id})
+        if not doc: return False
+        await self.db.skill_versions.update_many({"skill_id": doc["skill_id"], "tenant_id": tenant_id}, {"$set": {"is_active": False}})
+        await self.db.skill_versions.update_one({"_id": oid}, {"$set": {"is_active": True}})
+        return True
+
+    async def delete_skill(self, name: str, tenant_id: str = "default") -> None:
+        skill = await self.db.skills.find_one({"name": name, "tenant_id": tenant_id})
+        if skill:
+            await self.db.skills.update_one({"_id": skill["_id"]}, {"$set": {"is_deleted": True}})
+            await self.db.skill_versions.update_many({"skill_id": skill["_id"], "tenant_id": tenant_id}, {"$set": {"is_active": False}})
+
+    async def fetch_all_skills(self, tenant_id: str = "default") -> List[Dict[str, Any]]:
+        docs = await self.db.skills.find({"tenant_id": tenant_id, "is_deleted": {"$ne": True}}).to_list(length=1000)
+        results = []
+        for skill in docs:
+            query = {"skill_id": skill["_id"], "tenant_id": tenant_id}
+            active = await self.db.skill_versions.find_one({**query, "is_active": True})
+            latest = active or await self.db.skill_versions.find_one(query, sort=[("version_number", -1)])
+            results.append({"id": str(skill["_id"]), "name": skill["name"], "active_version": active.get("version_number") if active else None,
+                            "last_edited_by": (active or latest).get("created_by") if (active or latest) else None,
+                            "last_updated": (active or latest).get("created_at") if (active or latest) else None,
+                            "content": latest.get("content") if latest else None})
+        return sorted(results, key=lambda item: item["name"])
+
+    async def fetch_skill_changelog(self, name: str, tenant_id: str = "default") -> List[Dict[str, Any]]:
+        cursor = self.db.skill_changelog.find({"skill_name": name, "tenant_id": tenant_id}).sort("version_number", -1)
+        return [{"id": str(d["_id"]), "version_id": str(d["version_id"]), "version_number": d.get("version_number"), "entry": d.get("entry"), "generated_by": d.get("generated_by"), "created_at": d.get("created_at"), "created_by": d.get("created_by", "")} for d in await cursor.to_list(length=1000)]
+
+    async def upsert_skill_changelog_entry(self, version_id: Any, entry: str, generated_by: str = "user", created_by: str = "", tenant_id: str = "default") -> None:
+        from bson import ObjectId
+        try: oid = ObjectId(str(version_id))
+        except Exception: return
+        version = await self.db.skill_versions.find_one({"_id": oid, "tenant_id": tenant_id})
+        if not version: return
+        await self.db.skill_changelog.update_one({"version_id": oid, "tenant_id": tenant_id},
+            {"$set": {"skill_id": version["skill_id"], "skill_name": version["skill_name"], "version_number": version["version_number"], "entry": entry, "generated_by": generated_by, "created_by": created_by, "created_at": time.strftime("%Y-%m-%d %H:%M:%S")}}, upsert=True)
 
     async def fetch_prompt_versions(self, name: str, tenant_id: str = "default") -> List[Dict[str, Any]]:
         cursor = self.db.prompt_versions.find(
@@ -1346,7 +1582,9 @@ class MongoStorage(BaseStorage):
         ]
 
     async def export_prompts(self, tenant_id: str = "default") -> Dict[str, str]:
-        cursor = self.db.prompt_versions.find({"tenant_id": tenant_id, "is_active": True})
+        cursor = self.db.prompt_versions.find({
+            "tenant_id": tenant_id, "is_active": True,
+        })
         docs = await cursor.to_list(length=1000)
         return {d["prompt_name"]: d["content"] for d in docs}
 

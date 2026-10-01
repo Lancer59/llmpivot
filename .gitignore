@@ -20,6 +20,7 @@ env/
 *.db
 *.db-shm
 *.db-wal
+prompts_fallback.json
 
 # IDE
 .vscode/

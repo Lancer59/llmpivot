@@ -1,22 +1,21 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "llmpivot"
 version = "0.2.0"
-description = "Runtime prompt control, versioning, and user management for production apps"
+description = "Versioned prompts and Agent Skills with progressive context loading for production LLM apps"
 readme = "README.md"
-license = { text = "MIT" }
+license = "MIT"
 requires-python = ">=3.9"
 authors = [
     { name = "Sanath Goutham", email = "sanathgoutham@gmail.com" }
 ]
-keywords = ["prompts", "llm", "prompt-management", "fastapi", "versioning", "mongodb", "rbac"]
+keywords = ["prompts", "agent-skills", "llm", "progressive-context", "fastapi", "versioning", "mongodb", "rbac", "instruction-studio"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",

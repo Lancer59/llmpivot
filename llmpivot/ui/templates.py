@@ -11,6 +11,11 @@ import difflib
 from typing import Optional, List, Dict, Any
 
 try:
+    from ..tokens import estimate_tokens
+except ImportError:  # pragma: no cover - supports direct module loading
+    from llmpivot.tokens import estimate_tokens
+
+try:
     from .helpers import escape as _escape, render_user_badge
 except ImportError:  # pragma: no cover - supports direct module loading in tests
     import importlib.util
@@ -23,7 +28,7 @@ except ImportError:  # pragma: no cover - supports direct module loading in test
     _escape = module.escape
     render_user_badge = module.render_user_badge
 
-APP_NAME = "Prompt Manager"
+APP_NAME = "Instruction Studio"
 
 
 def _csrf_field(csrf_token: Optional[str]) -> str:
@@ -182,6 +187,7 @@ def _layout(title: str, body: str, protected: bool = False, base: str = "", user
     {badge}
     <div class="nav-links">
       <a href="{base}/list" class="nav-link">Prompts</a>
+      <a href="{base}/skills" class="nav-link">Skills</a>
       <a href="{base}/tree" class="nav-link">Hierarchy</a>
       <a href="{base}/edit/__new__" class="nav-link">+ New Prompt</a>
       <a href="{base}/context" class="nav-link">Context</a>
@@ -207,11 +213,13 @@ def prompt_list(prompts: list, protected: bool = False, base: str = "", user: Op
         v_str = f"v{v}" if v else "<span class='text-muted'>none</span>"
         editor = p.get("last_edited_by") or "-"
         updated = p.get("last_updated") or "-"
+        token_estimate = estimate_tokens(p.get("active_content_chars") or 0)
         name = _escape(p["name"])
         rows += f"""
         <tr>
           <td><a href="{base}/detail/{name}" style="font-weight:600;">{name}</a></td>
           <td>{v_str}</td>
+          <td title="Approximate: 1 token per 4 characters">~{token_estimate}</td>
           <td>{_escape(editor)}</td>
           <td class="text-muted" style="font-size:0.82rem;">{_escape(updated)}</td>
           <td style="text-align:right;">
@@ -220,7 +228,7 @@ def prompt_list(prompts: list, protected: bool = False, base: str = "", user: Op
         </tr>"""
 
     if not rows:
-        rows = '<tr><td colspan="5" style="text-align:center;padding:32px;color:var(--muted);">No prompts yet. <a href="' + base + '/edit/__new__">Create one</a>.</td></tr>'
+        rows = '<tr><td colspan="6" style="text-align:center;padding:32px;color:var(--muted);">No prompts yet. <a href="' + base + '/edit/__new__">Create one</a>.</td></tr>'
 
     body = f"""
 <div class="flex-between" style="margin-bottom:24px;">
@@ -239,6 +247,7 @@ def prompt_list(prompts: list, protected: bool = False, base: str = "", user: Op
       <tr>
         <th>Prompt Name</th>
         <th>Active Version</th>
+        <th>Est. Tokens</th>
         <th>Last Edited By</th>
         <th>Last Updated</th>
         <th></th>
@@ -288,10 +297,12 @@ def prompt_detail(
         created_by = _escape(v.get("created_by") or "-")
         created_at = _escape(v.get("created_at") or "-")
         content_preview = _escape((v.get("content", "") or "")[:120])
+        token_estimate = estimate_tokens(v.get("content", "") or "")
         v_rows += f"""
         <tr>
           <td><strong>v{v_num}</strong> {act_badge} {tag_badge}</td>
           <td>{created_by}</td>
+          <td title="Approximate: 1 token per 4 characters">~{token_estimate}</td>
           <td class="text-muted" style="font-size:0.82rem;">{created_at}</td>
           <td><pre style="max-height:60px;overflow:hidden;font-size:0.8rem;color:var(--muted-strong);">{content_preview}</pre></td>
           <td style="text-align:right;">{act_btn}</td>
@@ -316,6 +327,7 @@ def prompt_detail(
       <tr>
         <th>Version</th>
         <th>Edited By</th>
+        <th>Est. Tokens</th>
         <th>Date</th>
         <th>Content Preview</th>
         <th></th>
@@ -421,11 +433,7 @@ def edit_page(
     <textarea id="content" name="content" rows="12">{_escape(content)}</textarea>
   </div>
 
-  <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;margin-bottom:16px;">
-    <div class="form-group">
-      <label for="edited_by">Your Name / Team</label>
-      <input type="text" id="edited_by" name="edited_by" value="{_escape(user.get('username', '') if user else '')}" placeholder="e.g. alex">
-    </div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px;">
     <div class="form-group">
       <label for="tag">Environment Tag</label>
       <select id="tag" name="tag">
@@ -451,6 +459,17 @@ def edit_page(
     <a href="{base}/list" class="btn btn-ghost">Cancel</a>
   </div>
 </form>
+<p class="text-muted" style="font-size:.82rem;margin-top:8px;">Prompt estimate: <strong id="token-estimate">~{estimate_tokens(content)}</strong> tokens <span>(approx. 1 token per 4 characters; model tokenizer counts vary)</span></p>
+<script>
+(() => {{
+  const content = document.getElementById('content');
+  const output = document.getElementById('token-estimate');
+  if (!content || !output) return;
+  const update = () => {{ output.textContent = '~' + Math.ceil(content.value.length / 4); }};
+  content.addEventListener('input', update);
+  update();
+}})();
+</script>
 {script_tag}"""
     return _layout(title_text, body, protected, base, user, pivot_widget)
 
@@ -507,7 +526,7 @@ def ab_test_page(
         for v in versions
     )
 
-    llm_notice = "" if has_llm else '<div class="error" style="margin-bottom:16px;">LLM provider is not configured. Configure <code>llm_url</code> in PromptManager to enable live A/B test runs.</div>'
+    llm_notice = "" if has_llm else '<div class="error" style="margin-bottom:16px;">LLM provider is not configured. Configure <code>llm_url</code> in LLMAssetManager to enable live A/B test runs.</div>'
 
     body = f"""
 <h1>A/B Test Prompt: <span style="color:var(--accent);">{_escape(name)}</span></h1>
@@ -619,7 +638,7 @@ def login_page(base: str = "", error: Optional[str] = None) -> str:
     body = f"""
 <div style="max-width:380px;margin:60px auto;">
   <div class="card">
-    <h1 style="text-align:center;margin-bottom:12px;font-size:1.35rem;">Login to Prompt Manager</h1>
+    <h1 style="text-align:center;margin-bottom:12px;font-size:1.35rem;">Login to Instruction Studio</h1>
     <p class="text-muted" style="text-align:center;font-size:0.82rem;margin-bottom:20px;">Use your credentials or reach out to an Admin.</p>
     {err_div}
     <form method="post" action="{base}/login">
@@ -1225,6 +1244,125 @@ def _hierarchy_warning_panel(children: list, base: str, parent_name: str) -> str
     </div>
   </div>
 </div>"""
+
+
+def skills_page(skills: list, protected: bool = False, base: str = "", user: Optional[dict] = None) -> str:
+    rows = ""
+    for item in skills:
+        name = _escape(item.get("name", ""))
+        version = item.get("active_version")
+        version_text = f"v{version}" if version else '<span class="text-muted">Draft only</span>'
+        rows += f"""
+        <tr><td><a href="{base}/skills/detail/{name}" style="font-weight:650;">{name}</a></td>
+        <td style="max-width:460px;">{_escape(item.get('description', ''))}</td><td>{version_text}</td>
+        <td class="text-muted">{_escape(item.get('last_updated') or '—')}</td>
+        <td style="text-align:right;"><a href="{base}/skills/edit/{name}" class="btn btn-ghost btn-sm">Edit</a></td></tr>"""
+    if not rows:
+        rows = '<tr><td colspan="5" style="text-align:center;padding:36px;color:var(--muted);">No skills yet. Create one or import a standard skill bundle.</td></tr>'
+    body = f"""
+<div class="flex-between" style="margin-bottom:24px;"><div><h1>Agent Skills</h1><p class="text-muted">Version, activate, compare, and test reusable agent instructions.</p></div>
+<div class="flex"><a href="{base}/skills/import" class="btn btn-ghost">Import .zip</a><a href="{base}/skills/edit/__new__" class="btn btn-primary">New Skill</a></div></div>
+<div class="card" style="padding:0;overflow:hidden;"><table><thead><tr><th>Skill</th><th>Description</th><th>Active Version</th><th>Updated</th><th></th></tr></thead><tbody>{rows}</tbody></table></div>"""
+    return _layout("Agent Skills", body, protected, base, user)
+
+
+def skill_import_page(protected: bool = False, base: str = "", user: Optional[dict] = None,
+                     error: Optional[str] = None, csrf_token: Optional[str] = None) -> str:
+    err_div = f'<div class="error">{_escape(error)}</div>' if error else ""
+    body = f"""
+<div style="margin-bottom:22px;"><p class="text-muted" style="font-size:.76rem;letter-spacing:.08em;text-transform:uppercase;margin-bottom:8px;">Agent Skills / Import</p><h1>Import a skill bundle</h1><p class="text-muted">Upload a ZIP containing a root SKILL.md and optional Markdown references.</p></div>{err_div}
+<form method="post" action="{base}/skills/import" enctype="multipart/form-data" class="card">{_csrf_field(csrf_token)}
+<div class="form-group"><label for="skill_file">Skill archive (.zip)</label><input id="skill_file" name="skill_file" type="file" accept=".zip,application/zip" required></div>
+<div class="form-group"><label for="set_active">After import</label><select id="set_active" name="set_active"><option value="1">Activate imported version</option><option value="0">Save as draft</option></select></div>
+<div class="flex"><button class="btn btn-primary" type="submit">Import Skill</button><a href="{base}/skills" class="btn btn-ghost">Cancel</a></div></form>"""
+    return _layout("Import Skill", body, protected, base, user)
+
+
+def skill_edit_page(name: str, description: str, instructions: str, references: dict,
+                    protected: bool = False, base: str = "", user: Optional[dict] = None,
+                    error: Optional[str] = None, is_new: bool = False,
+                    csrf_token: Optional[str] = None, pivot_widget: str = "") -> str:
+    import json
+    err_div = f'<div class="error">{_escape(error)}</div>' if error else ""
+    action_name = "__new__" if is_new else _escape(name)
+    name_field = (f'<div class="form-group"><label for="skill_name">Skill name (lowercase slug)</label>'
+                  f'<input id="skill_name" name="skill_name" required pattern="[a-z0-9]+(-[a-z0-9]+)*" '
+                  f'maxlength="64" value="{_escape(name)}" placeholder="e.g. release-review"></div>') if is_new else ""
+    existing_name = "" if is_new else f'<p class="text-muted" style="margin-bottom:18px;">Skill: <strong>{_escape(name)}</strong></p>'
+    body = f"""
+<div style="margin-bottom:24px;"><p class="text-muted" style="font-size:.76rem;letter-spacing:.08em;text-transform:uppercase;margin-bottom:8px;">Agent Skills / Version editor</p><h1>{'Create skill' if is_new else 'Create a new version'}</h1><p class="text-muted">Changes are saved as a new version. Activate after review.</p></div>{err_div}
+<form method="post" action="{base}/skills/edit/{action_name}" class="card">{_csrf_field(csrf_token)}{name_field}{existing_name}
+<div class="form-group"><label for="description">Description · what it does and when to use it</label><textarea id="description" name="description" rows="2" maxlength="1024" required>{_escape(description)}</textarea></div>
+<div class="form-group"><label for="instructions">SKILL.md instructions</label><textarea id="instructions" name="instructions" rows="18" required placeholder="## Workflow&#10;1. Load relevant context...">{_escape(instructions)}</textarea></div>
+<details class="form-group"><summary style="cursor:pointer;color:var(--muted-strong);font-size:.84rem;font-weight:650;margin-bottom:12px;">Reference files · loaded on demand</summary><label for="references_json">Markdown reference path → content (JSON)</label><textarea id="references_json" name="references_json" rows="8" spellcheck="false">{_escape(json.dumps(references, ensure_ascii=False, indent=2))}</textarea><p class="text-muted" style="font-size:.76rem;margin-top:6px;">Use paths such as references/policy.md. Scripts are not executed.</p></details>
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:18px;"><div><label for="tag">Release tag</label><select id="tag" name="tag"><option value="">No tag</option><option value="prod">Production</option><option value="staging">Staging</option><option value="experiment">Experiment</option></select></div><div><label for="set_active">Activation</label><select id="set_active" name="set_active"><option value="0">Save as draft</option><option value="1">Activate this version</option></select></div></div>
+<div class="flex"><button type="submit" class="btn btn-primary">Save Skill Version</button><a href="{base}/skills" class="btn btn-ghost">Cancel</a></div></form>"""
+    return _layout("Edit Skill", body, protected, base, user, pivot_widget)
+
+
+def skill_detail_page(name: str, skill: Optional[dict], versions: list, changelog: list,
+                      protected: bool = False, base: str = "", user: Optional[dict] = None,
+                      csrf_token: Optional[str] = None, can_delete: bool = False) -> str:
+    import json
+    current_version = skill.get("version") if skill else None
+    description = _escape(skill.get("description", "")) if skill else "No version is active yet."
+    changelog_map = {str(item.get("version_id")): item.get("entry", "") for item in changelog}
+    rows = ""
+    for version in versions:
+        vid = _escape(str(version["id"]))
+        active = bool(version.get("is_active"))
+        badge = '<span class="badge badge-active">Active</span>' if active else ""
+        activate = "" if active else (f'<form method="post" action="{base}/skills/activate/{_escape(name)}/{vid}">'
+                                       f'{_csrf_field(csrf_token)}<button class="btn btn-ghost btn-sm" type="submit">Activate</button></form>')
+        rows += (f'<tr><td><strong>v{version["version_number"]}</strong> {badge}</td>'
+                 f'<td>{_escape(version.get("tag") or "—")}</td><td>{_escape(version.get("created_by") or "—")}</td>'
+                 f'<td class="text-muted">{_escape(version.get("created_at") or "—")}</td>'
+                 f'<td>{_escape(changelog_map.get(str(version["id"]), "—"))}</td><td style="text-align:right;">{activate}</td></tr>')
+    if not rows:
+        rows = '<tr><td colspan="6" class="text-muted">No saved versions.</td></tr>'
+    files = skill.get("references", []) if skill else []
+    ref_list = ", ".join(f"<code>{_escape(path)}</code>" for path in files) or "No reference files"
+    delete_form = (f'<form method="post" action="{base}/skills/delete/{_escape(name)}" onsubmit="return confirm(\'Delete this skill and hide its versions?\')">{_csrf_field(csrf_token)}<button class="btn btn-danger" type="submit">Delete</button></form>' if can_delete else "")
+    body = f"""
+<div class="flex-between" style="margin-bottom:22px;"><div><p class="text-muted" style="font-size:.76rem;letter-spacing:.08em;text-transform:uppercase;margin-bottom:8px;">Agent Skills / {_escape(name)}</p><h1>{_escape(name)} {f'<span class="badge badge-active">v{current_version} active</span>' if current_version else ''}</h1><p class="text-muted">{description}</p></div><div class="flex"><a href="{base}/skills/test/{_escape(name)}" class="btn btn-ghost">A/B Test</a><a href="{base}/skills/diff/{_escape(name)}" class="btn btn-ghost">Compare</a><a href="{base}/skills/edit/{_escape(name)}" class="btn btn-primary">New Version</a><a href="{base}/skills/export/{_escape(name)}" class="btn btn-ghost">Download .zip</a>{delete_form}</div></div>
+<div class="card"><h2>Progressive loading</h2><p class="text-muted">The catalog exposes the short description first. Pivot loads the active SKILL.md and each reference only when requested.</p><p style="margin-top:10px;font-size:.82rem;">{ref_list}</p></div>
+<div class="card" style="padding:0;overflow:hidden;"><table><thead><tr><th>Version</th><th>Tag</th><th>Saved By</th><th>Date</th><th>Changelog</th><th></th></tr></thead><tbody>{rows}</tbody></table></div>"""
+    return _layout(f"Skill: {name}", body, protected, base, user)
+
+
+def skill_diff_page(name: str, versions: list, v1: Optional[dict], v2: Optional[dict],
+                    base: str = "", user: Optional[dict] = None) -> str:
+    def options(selected: Optional[dict]) -> str:
+        return "".join(
+            f'<option value="{_escape(str(version["id"]))}" '
+            f'{"selected" if selected and str(version["id"]) == str(selected["id"]) else ""}>'
+            f'v{version["version_number"]} · {_escape(version.get("tag") or "no tag")}</option>'
+            for version in versions
+        )
+    diff_html = ""
+    if v1 and v2:
+        left = (v1.get("content") or "").splitlines()
+        right = (v2.get("content") or "").splitlines()
+        diff = "\n".join(difflib.unified_diff(left, right, fromfile="Version A", tofile="Version B", lineterm=""))
+        diff_html = f'<div class="card"><pre>{_escape(diff or "No differences found.")}</pre></div>'
+    body = f"""
+<div style="margin-bottom:20px;"><p class="text-muted" style="font-size:.76rem;letter-spacing:.08em;text-transform:uppercase;margin-bottom:8px;">Agent Skills / {_escape(name)}</p><h1>Compare SKILL.md versions</h1></div>
+<form method="get" action="{base}/skills/diff/{_escape(name)}" class="card flex"><div><label for="v1">Version A</label><select id="v1" name="v1">{options(v1)}</select></div><div><label for="v2">Version B</label><select id="v2" name="v2">{options(v2)}</select></div><button class="btn btn-primary" type="submit">Compare</button></form>
+{diff_html}"""
+    return _layout(f"Skill Diff: {name}", body, False, base, user)
+
+
+def skill_test_page(name: str, versions: list, protected: bool, has_llm: bool, base: str,
+                    user: Optional[dict] = None, result_a: str = "", result_b: str = "",
+                    selected_a: str = "", selected_b: str = "", task: str = "") -> str:
+    options_a = "".join(f'<option value="{_escape(str(v["id"]))}" {"selected" if str(v["id"]) == selected_a else ""}>v{v["version_number"]} · {_escape(v.get("tag") or "no tag")}{" · active" if v.get("is_active") else ""}</option>' for v in versions)
+    options_b = "".join(f'<option value="{_escape(str(v["id"]))}" {"selected" if str(v["id"]) == selected_b else ""}>v{v["version_number"]} · {_escape(v.get("tag") or "no tag")}{" · active" if v.get("is_active") else ""}</option>' for v in versions)
+    notice = "" if has_llm else '<div class="error">Configure an LLM endpoint to run skill evaluations.</div>'
+    body = f"""
+<div style="margin-bottom:22px;"><p class="text-muted" style="font-size:.76rem;letter-spacing:.08em;text-transform:uppercase;margin-bottom:8px;">Skills / {_escape(name)}</p><h1>Evaluate skill versions</h1><p class="text-muted">Run the same task with two skill versions and compare results.</p></div>{notice}
+<form method="post" action="{base}/skills/test/{_escape(name)}" class="card"><div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;"><div><label for="v1">Version A</label><select id="v1" name="v1">{options_a}</select></div><div><label for="v2">Version B</label><select id="v2" name="v2">{options_b}</select></div></div><div style="margin:18px 0;"><label for="task">Evaluation task</label><textarea id="task" name="task" rows="4" required>{_escape(task)}</textarea></div><button class="btn btn-primary" type="submit" {'disabled' if not has_llm else ''}>Run comparison</button></form>
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;"><div class="card"><h2>Version A result</h2><pre class="text-muted">{_escape(result_a or 'Run an evaluation to see the result.')}</pre></div><div class="card"><h2>Version B result</h2><pre class="text-muted">{_escape(result_b or 'Run an evaluation to see the result.')}</pre></div></div>"""
+    return _layout(f"A/B Test Skill: {name}", body, protected, base, user)
 
 
 # ---------------------------------------------------------------------------

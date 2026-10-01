@@ -1,6 +1,6 @@
 # llmpivot
 
-**Runtime prompt management for production LLM applications — with a built-in AI assistant.**
+**Versioned prompts and Agent Skills for production LLM applications — with a built-in AI assistant.**
 
 Change a prompt in the web UI — see it reflected in your running app in seconds. No redeployment. No code changes. And when you need help, the **Assistant** is already watching the screen.
 
@@ -10,7 +10,9 @@ Change a prompt in the web UI — see it reflected in your running app in second
 
 llmpivot sits alongside your FastAPI app. You mount it at a path (e.g. `/prompts`) and it gives you:
 
-- A web UI to create, edit, version, and activate prompts
+- A web UI to create, edit, version, compare, test, and activate prompts and Agent Skills
+- Standard `SKILL.md` bundles with metadata, Markdown references, and ZIP import/export
+- Progressive skill loading: expose descriptions first, then load one skill or reference only when needed
 - An in-memory cache so your app reads prompts at zero latency
 - Full version history with one-click rollback
 - RBAC authentication (admin / editor / viewer)
@@ -21,6 +23,7 @@ llmpivot sits alongside your FastAPI app. You mount it at a path (e.g. `/prompts
 - A **floating Assistant widget** that watches what you're doing and surfaces observations, alerts, and suggestions without being asked
 - A **fallback snapshot** (`prompts_fallback.json`) written on every activation — if the DB goes down your app keeps serving the last known good prompts
 - Usage logging, A/B testing, audit log, import/export, and a real `/healthz` endpoint
+- Lightweight prompt token estimates in Instruction Studio, with no tokenizer dependency
 
 Your app code just does:
 
@@ -28,6 +31,11 @@ Your app code just does:
 meta = await aget_prompt_with_meta("my_prompt")
 # use meta["content"] as your LLM system prompt
 ```
+
+Instruction Studio shows a rough token estimate for each active prompt and saved
+version. You can also call `estimate_tokens(text)` from Python. It uses a
+lightweight four-characters-per-token heuristic; the model tokenizer remains the
+source of truth for billing and context limits.
 
 ---
 
@@ -62,9 +70,9 @@ pip install -e .
 import os
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
-from llmpivot import PromptManager, PromptNotFoundError, aget_prompt_with_meta, log_prompt_usage
+from llmpivot import LLMAssetManager, PromptNotFoundError, aget_prompt_with_meta, log_prompt_usage
 
-manager = PromptManager(
+manager = LLMAssetManager(
     db_path="prompts.db",
     cache_ttl=5,
     auth_mode="rbac",
@@ -118,7 +126,7 @@ Open **http://localhost:8000/prompts/list** — log in with `admin` / `changeme`
 Pass the Azure endpoint directly — llmpivot detects Azure URLs automatically, uses the correct `api-key` header, and selects `max_completion_tokens` vs `max_tokens` based on the model generation:
 
 ```python
-manager = PromptManager(
+manager = LLMAssetManager(
     db_path="prompts.db",
     llm_url="https://myresource.openai.azure.com/openai/deployments/gpt-4o/chat/completions?api-version=2024-08-01-preview",
     llm_api_key=os.environ["AZURE_OPENAI_API_KEY"],
@@ -156,6 +164,22 @@ When `pivot_enabled=True`, a floating **Assistant** pill appears in the bottom-r
 - "Show me all prompts under the support agent"
 
 The widget state (open/closed) is persisted per browser in `localStorage`. No page refresh needed.
+
+## Agent Skills
+
+Skills are managed as versioned LLM instruction assets alongside prompts. Create them in the UI, save new versions, compare and evaluate versions side by side, activate a release, and import or export portable skill ZIPs. A skill bundle contains a standard `SKILL.md` and may include Markdown files under `references/`. Bundled scripts and binary assets are not executed or loaded.
+
+Application code can progressively load a short catalog, then one selected skill, then a named reference:
+
+```python
+from llmpivot import alist_skills, aget_skill, aget_skill_reference
+
+catalog = await alist_skills()  # names and descriptions only
+skill = await aget_skill("release-review")  # active SKILL.md + version metadata
+policy = await aget_skill_reference("release-review", "references/policy.md")
+```
+
+`LLMAssetManager.skill_tool_schemas()` and `await manager.call_skill_tool(name, arguments)` provide a provider-neutral function-tool bridge for agent frameworks. Pivot uses progressive loading by default. Set `skill_loading_mode="eager"` to include all active skill instructions and references in each Pivot chat request.
 
 ---
 
@@ -198,7 +222,9 @@ content = await aget_prompt_with_fallback("my_prompt")
 
 ## Configuration reference
 
-All parameters passed to `PromptManager()`.
+All parameters passed to `LLMAssetManager()`.
+
+`PromptManager` remains an import-compatible alias. New applications should use `LLMAssetManager`.
 
 ### Storage
 
@@ -251,6 +277,7 @@ All parameters passed to `PromptManager()`.
 | `pivot_proactive` | `bool` | `True` | Auto-analyse current page. `False` = chat-only mode |
 | `auto_changelog` | `bool` | `True` | Auto-generate changelog entry on every version save (requires LLM) |
 | `pivot_model` | `str` | `None` | Override model for the Assistant specifically |
+| `skill_loading_mode` | `str` | `"progressive"` | Pivot context policy: load individual skills on demand, or eagerly include all active skills |
 
 ### Fallback snapshot
 
@@ -270,14 +297,14 @@ No authentication. Use only behind a VPN or on localhost.
 Single admin password required for all write operations.
 
 ```python
-PromptManager(protected_mode=True, admin_password="your-password")
+LLMAssetManager(protected_mode=True, admin_password="your-password")
 ```
 
 ### `"rbac"` (recommended for production)
 Full multi-user RBAC with login/logout, session cookies, and role enforcement.
 
 ```python
-PromptManager(
+LLMAssetManager(
     auth_mode="rbac",
     secret_key=os.environ["LLMPIVOT_SECRET"],
     bootstrap_admin=True,
@@ -320,6 +347,12 @@ PromptManager(
 | `/prompts/healthz` | — | Liveness probe (DB + worker health) |
 | `/prompts/pivot/observe` | viewer | SSE stream: proactive observations for current page |
 | `/prompts/pivot/chat` | viewer | Chunked HTTP: Assistant chat reply stream |
+| `/prompts/skills` | viewer | Active Agent Skill catalog |
+| `/prompts/skills/edit/{name}` | editor | Create a new skill version |
+| `/prompts/skills/detail/{name}` | viewer | Skill history and activation |
+| `/prompts/skills/diff/{name}` | viewer | Compare two SKILL.md versions |
+| `/prompts/skills/test/{name}` | viewer | Evaluate two skill versions against the same task |
+| `/prompts/skills/import` and `/prompts/skills/export/{name}` | editor / viewer | Import or export portable skill ZIPs |
 
 ---
 
@@ -338,7 +371,15 @@ Tries live cache/DB first. Falls back to `prompts_fallback.json` if unavailable.
 Sync wrapper. Use in plain scripts or non-async contexts.
 
 ### `log_prompt_usage(name, version_id, input_text, output_text)`
-Fire-and-forget usage logging. Non-blocking.
+Fire-and-forget usage logging. Non-blocking. When a workflow must wait for queued
+entries to appear in the Logs view, call `await manager.usage_logger.flush()`.
+
+### Agent Skill loading
+
+- `alist_skills()` returns active skill names and descriptions without loading their instructions.
+- `aget_skill(name)` returns one active `SKILL.md` and its version metadata.
+- `aget_skill_reference(name, path)` loads one Markdown reference under `references/` on demand.
+- `LLMAssetManager.skill_tool_schemas()` and `call_skill_tool()` expose a provider-neutral progressive function-tool flow for application agents.
 
 ---
 

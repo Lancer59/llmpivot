@@ -2,7 +2,7 @@
 Backward-compatible wrapper routing SQLite queries to SQLiteStorage engine.
 
 DEPRECATED: This module is a legacy shim retained for backward compatibility only.
-All calls default to tenant_id="default" regardless of how PromptManager was configured.
+All calls default to tenant_id="default" regardless of how LLMAssetManager was configured.
 New code should use manager.storage directly, or the public API functions in llmpivot/__init__.py.
 """
 
@@ -12,7 +12,7 @@ from .storage import SQLiteStorage
 
 warnings.warn(
     "llmpivot.db is a deprecated backward-compatibility shim. "
-    "It always uses tenant_id='default' regardless of your PromptManager tenant configuration. "
+    "It always uses tenant_id='default' regardless of your LLMAssetManager tenant configuration. "
     "Use manager.storage directly for tenant-aware operations.",
     DeprecationWarning,
     stacklevel=2,

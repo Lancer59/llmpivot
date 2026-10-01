@@ -1,20 +1,21 @@
 """
-llmpivot - runtime prompt control for production apps.
+llmpivot - versioned prompt and agent skill management for production apps.
 
 Quick start:
-    from llmpivot import PromptManager, get_prompt
+    from llmpivot import LLMAssetManager, get_prompt
 
-    PromptManager(db_path="prompts.db", cache_ttl=5)
+    LLMAssetManager(db_path="prompts.db", cache_ttl=5)
     prompt = get_prompt("summary")
 """
 
-from .manager import PromptManager, PromptNotFoundError, get_instance
+from .manager import LLMAssetManager, PromptManager, PromptNotFoundError, get_instance
+from .tokens import estimate_tokens
 
 
 def get_prompt(name: str) -> str:
     """
     Return the active version content for the named prompt.
-    PromptManager must be initialized before calling this.
+    LLMAssetManager must be initialized before calling this.
     """
     return get_instance().get_sync(name)
 
@@ -70,12 +71,32 @@ def log_prompt_usage(
     get_instance().log_usage(prompt_name, version_id, input_text, output_text)
 
 
+async def alist_skills() -> list:
+    """Return active skill names and descriptions without loading instructions."""
+    return await get_instance().list_skills()
+
+
+async def aget_skill(name: str) -> dict:
+    """Load one active skill's SKILL.md instructions and version metadata."""
+    return await get_instance().get_skill(name)
+
+
+async def aget_skill_reference(name: str, path: str) -> str:
+    """Load one Markdown reference file from an active skill on demand."""
+    return await get_instance().get_skill_reference(name, path)
+
+
 __all__ = [
+    "LLMAssetManager",
     "PromptManager",
     "PromptNotFoundError",
+    "estimate_tokens",
     "get_prompt",
     "aget_prompt",
     "aget_prompt_with_meta",
     "aget_prompt_with_fallback",
     "log_prompt_usage",
+    "alist_skills",
+    "aget_skill",
+    "aget_skill_reference",
 ]
